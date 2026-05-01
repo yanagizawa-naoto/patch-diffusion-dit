@@ -79,12 +79,11 @@ class PatchCropper:
     def __init__(self, img_size=512, patch_size=32, real_p=0.5):
         self.img_size = img_size
         self.patch_size = patch_size
-        self.crop_sizes = [img_size, img_size // 2, img_size // 4]
-        self.crop_probs = [real_p, (1 - real_p) * 0.6, (1 - real_p) * 0.4]
+        self.crop_sizes = [img_size, img_size // 2]
+        self.crop_probs = [real_p, 1 - real_p]
         self.batch_muls = {
             img_size: 1,
             img_size // 2: 4,
-            img_size // 4: 16,
         }
 
     def sample_crop_size(self):
