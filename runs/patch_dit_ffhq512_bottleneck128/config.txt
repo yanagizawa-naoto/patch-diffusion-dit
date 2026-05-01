@@ -1,0 +1,28 @@
+実験: bottleneck_dim=128, depth=24, hidden=1024
+結果: 27.6Kステップでloss 0.06付近に収束気味。サンプルはぼやけた顔の輪郭程度。
+所見: bottleneck_dim=128はpatch_size=32に対して圧縮率が高すぎた可能性 (24倍圧縮)。
+
+設定:
+  batch_size: 32
+  bottleneck_dim: 128
+  depth: 24
+  hidden_size: 1024
+  num_heads: 16
+  patch_size: 32
+  img_size: 512
+  lr: 0.0001
+  real_p: 0.5
+  lognorm_m: 0.0
+  lognorm_s: 1.0
+  ema_decay: 0.9999
+  warmup_steps: 1000
+  use_amp: True
+  model_params: 461.8M
+
+loss推移:
+  step   100: 2.43
+  step  1000: 0.17
+  step  5000: 0.10
+  step 10000: 0.07
+  step 20000: 0.06
+  step 27600: 0.06 (終了)

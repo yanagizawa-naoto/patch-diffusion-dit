@@ -8,8 +8,10 @@ celebamask_hq_15class/
 identity_CelebA.txt
 ffhq-dataset/
 
-# Training outputs (checkpoints are on HuggingFace Hub)
-runs/
+# Training outputs
+runs/*/ckpt_*.pt
+runs/*/samples/
+runs/*/tb_logs/
 __pycache__/
 *.pyc
 
