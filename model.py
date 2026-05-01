@@ -33,18 +33,31 @@ class SwiGLUFFN(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
-class BottleneckPatchEmbed(nn.Module):
-    def __init__(self, patch_size, in_channels, embed_dim, bottleneck_dim):
+class PatchEmbed(nn.Module):
+    """
+    bottleneck_dim=None: 直接射影 (patch_pixels → hidden_size)
+    bottleneck_dim=int:  ボトルネック (patch_pixels → bottleneck → hidden_size)
+    """
+    def __init__(self, patch_size, in_channels, embed_dim, bottleneck_dim=None):
         super().__init__()
         self.patch_size = patch_size
-        self.proj1 = nn.Conv2d(in_channels, bottleneck_dim,
-                               kernel_size=patch_size, stride=patch_size)
-        self.act = nn.GELU()
-        self.proj2 = nn.Conv2d(bottleneck_dim, embed_dim, kernel_size=1)
+        if bottleneck_dim is None:
+            self.proj = nn.Conv2d(in_channels, embed_dim,
+                                  kernel_size=patch_size, stride=patch_size)
+            self.bottleneck = False
+        else:
+            self.proj1 = nn.Conv2d(in_channels, bottleneck_dim,
+                                   kernel_size=patch_size, stride=patch_size)
+            self.act = nn.GELU()
+            self.proj2 = nn.Conv2d(bottleneck_dim, embed_dim, kernel_size=1)
+            self.bottleneck = True
 
     def forward(self, x):
-        x = self.act(self.proj1(x))
-        x = self.proj2(x)
+        if self.bottleneck:
+            x = self.act(self.proj1(x))
+            x = self.proj2(x)
+        else:
+            x = self.proj(x)
         return x.flatten(2).transpose(1, 2)
 
 
@@ -165,9 +178,10 @@ class PatchDiffusionDiT(nn.Module):
                         例: 384, 512, 768, 1024, 1280
         num_heads:      Attention head数。hidden_sizeの約数であること。
                         例: 6, 8, 12, 16
-        bottleneck_dim: パッチ埋め込みのボトルネック次元。任意の正整数。
-                        patch_size²×in_channels(パッチの生ピクセル次元)より
-                        十分小さい値にする。例: 64, 128, 256
+        bottleneck_dim: パッチ埋め込みのボトルネック次元。
+                        None: 直接射影 (patch_pixels → hidden_size、ボトルネックなし)
+                        int:  ボトルネック経由 (patch_pixels → bottleneck → hidden_size)
+                        例: None, 128, 256, 512
 
     制約まとめ:
         - img_size % patch_size == 0
@@ -199,7 +213,7 @@ class PatchDiffusionDiT(nn.Module):
         self.grid_size = img_size // patch_size
         self.head_dim = hidden_size // num_heads
 
-        self.patch_embed = BottleneckPatchEmbed(
+        self.patch_embed = PatchEmbed(
             patch_size, in_channels, hidden_size, bottleneck_dim
         )
         self.t_embed = TimestepEmbedder(hidden_size)

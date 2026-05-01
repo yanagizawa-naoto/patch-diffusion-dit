@@ -368,7 +368,8 @@ if __name__ == "__main__":
     p.add_argument("--depth", type=int, default=24)
     p.add_argument("--hidden_size", type=int, default=1024)
     p.add_argument("--num_heads", type=int, default=16)
-    p.add_argument("--bottleneck_dim", type=int, default=128)
+    p.add_argument("--bottleneck_dim", type=int, default=None,
+                   help="None=直接射影, int=ボトルネック次元 (例: 128, 512)")
 
     # Patch Diffusion
     p.add_argument("--real_p", type=float, default=0.5)
