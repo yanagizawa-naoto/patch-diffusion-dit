@@ -28,6 +28,7 @@ import csv
 import math
 import argparse
 import time
+from datetime import datetime
 from pathlib import Path
 from copy import deepcopy
 
@@ -360,7 +361,8 @@ if __name__ == "__main__":
 
     # Data
     p.add_argument("--data_dir", type=str, default="./images512x512")
-    p.add_argument("--out_dir", type=str, default="./runs/patch_dit_ffhq512")
+    p.add_argument("--out_dir", type=str,
+                   default=f"./runs/patch_dit_ffhq512_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     p.add_argument("--img_size", type=int, default=512)
 
     # Model
