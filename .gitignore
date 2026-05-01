@@ -1,0 +1,24 @@
+# Datasets
+images512x512/
+images1024x1024/
+CelebAMask-HQ/
+CelebAMask-HQ.zip
+celebamask_hq_identity_disjoint/
+celebamask_hq_15class/
+identity_CelebA.txt
+ffhq-dataset/
+
+# Training outputs (checkpoints are on HuggingFace Hub)
+runs/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Environment
+.venv_auto
+
+# Screenshots
+*.png
+!/notes/*.png
