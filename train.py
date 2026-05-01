@@ -391,7 +391,7 @@ if __name__ == "__main__":
 
     # Model
     p.add_argument("--patch_size", type=int, default=16)
-    p.add_argument("--depth", type=int, default=24)
+    p.add_argument("--depth", type=int, default=12)
     p.add_argument("--hidden_size", type=int, default=768)
     p.add_argument("--num_heads", type=int, default=12)
     p.add_argument("--bottleneck_dim", type=int, default=None,
@@ -405,7 +405,7 @@ if __name__ == "__main__":
     p.add_argument("--lognorm_s", type=float, default=1.0)
 
     # Training
-    p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--batch_size", type=int, default=24)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--total_steps", type=int, default=200000)
     p.add_argument("--warmup_steps", type=int, default=1000)
