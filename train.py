@@ -263,11 +263,24 @@ def train(args):
     # TensorBoard
     writer = SummaryWriter(log_dir=str(out_dir / "tb_logs"))
 
+    # 設定をファイルに保存 + コンソール出力
+    config_path = out_dir / "config.json"
+    if step == 0:
+        import json
+        with open(config_path, "w") as f:
+            json.dump(vars(args), f, indent=2, default=str)
+
     start_time = time.time()
 
     print(f"Training for {args.total_steps} steps (starting from {step})...")
-    print(f"  Batch size: {args.batch_size}")
-    print(f"  Patch sizes: {cropper.crop_sizes} with probs {cropper.crop_probs}")
+    print(f"  Out dir: {out_dir}")
+    print(f"  Model: depth={args.depth}, hidden={args.hidden_size}, heads={args.num_heads}, "
+          f"patch={args.patch_size}, bottleneck={args.bottleneck_dim}")
+    print(f"  Params: {n_params:.1f}M")
+    print(f"  Batch size: {args.batch_size}, lr={args.lr}")
+    print(f"  Patch Diffusion: sizes={cropper.crop_sizes}, probs={cropper.crop_probs}")
+    print(f"  Flow matching: lognorm(m={args.lognorm_m}, s={args.lognorm_s})")
+    print(f"  AMP: {args.use_amp}, EMA decay: {args.ema_decay}")
 
     model.train()
     while step < args.total_steps:
@@ -377,10 +390,10 @@ if __name__ == "__main__":
     p.add_argument("--img_size", type=int, default=512)
 
     # Model
-    p.add_argument("--patch_size", type=int, default=32)
+    p.add_argument("--patch_size", type=int, default=16)
     p.add_argument("--depth", type=int, default=24)
-    p.add_argument("--hidden_size", type=int, default=1024)
-    p.add_argument("--num_heads", type=int, default=16)
+    p.add_argument("--hidden_size", type=int, default=768)
+    p.add_argument("--num_heads", type=int, default=12)
     p.add_argument("--bottleneck_dim", type=int, default=None,
                    help="None=直接射影, int=ボトルネック次元 (例: 128, 512)")
 
