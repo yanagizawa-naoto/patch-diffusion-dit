@@ -3,11 +3,19 @@ Patch Diffusion × JiT × MMDiT ハイブリッドモデルの訓練スクリプ
 タスク: FFHQ 512×512 無条件生成
 
 使い方:
-  # 学習開始 (デフォルト設定, ~132Mパラメータ)
+  # 学習開始 (デフォルト: 直接射影, depth=12, hidden=768, ~134M params)
   python train.py
 
-  # 300M級モデルで学習
-  python train.py --depth 16 --hidden_size 1024 --num_heads 16
+  # パッチ埋め込みの選択:
+  #   デフォルト (直接射影): 3072次元 → hidden_size に直接射影。情報損失が少ない
+  python train.py
+  #   ボトルネック経由: 3072次元 → bottleneck → hidden_size。パラメータ削減
+  python train.py --bottleneck_dim 128   # 24倍圧縮 (圧縮しすぎに注意)
+  python train.py --bottleneck_dim 512   # 6倍圧縮 (JiTと同等比率)
+
+  # モデルサイズの変更:
+  python train.py --depth 16 --hidden_size 1024 --num_heads 16   # ~300M
+  python train.py --depth 24 --hidden_size 1024 --num_heads 16   # ~460M
 
   # バッチサイズやステップ数を変更
   python train.py --batch_size 16 --total_steps 400000
@@ -16,11 +24,15 @@ Patch Diffusion × JiT × MMDiT ハイブリッドモデルの訓練スクリプ
   python train.py --no_amp
 
   # チェックポイントから再開
-  python train.py --resume ./runs/patch_dit_ffhq512/ckpt_0010000.pt
+  python train.py --resume ./runs/patch_dit_ffhq512_YYYYMMDD_HHMMSS/ckpt_0010000.pt
 
   # TensorBoardでlossグラフ・サンプル画像をリアルタイム監視 (別ターミナルで実行)
-  tensorboard --logdir ./runs/patch_dit_ffhq512/tb_logs --port 6006
+  tensorboard --logdir ./runs/<実験ディレクトリ>/tb_logs --port 6006
   # → ブラウザで http://localhost:6006 を開く
+
+  # 出力先は実行ごとに日時付きディレクトリが自動生成される
+  # 明示的に指定も可能:
+  python train.py --out_dir ./runs/my_experiment
 """
 
 import os
