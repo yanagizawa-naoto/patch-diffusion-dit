@@ -39,6 +39,17 @@ Patch Diffusion × JiT × MMDiT ハイブリッドモデルの訓練スクリプ
   # 出力先は実行ごとに日時付きディレクトリが自動生成される
   # 明示的に指定も可能:
   python train.py --out_dir ./runs/my_experiment
+
+  # === データセット (HuggingFace Hub) ===
+  # FFHQ 512×512 JPG画像:
+  #   huggingface-cli download --repo-type dataset Naoto-ipu/ffhq-512-jpg --local-dir .
+  #   tar xf images512x512_jpg.tar
+  # FLUX.1 VAE エンコード済みlatent (256×256, shape 16×32×32):
+  #   huggingface-cli download --repo-type dataset Naoto-ipu/ffhq-flux1-latents-256 --local-dir .
+  #   tar xf latents_flux1_256.tar
+  # 高速ダウンロード (hf_transfer):
+  #   pip install hf_transfer
+  #   HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download ...
 """
 
 import os
