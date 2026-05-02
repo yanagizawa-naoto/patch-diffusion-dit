@@ -30,6 +30,12 @@ Patch Diffusion × JiT × MMDiT ハイブリッドモデルの訓練スクリプ
   tensorboard --logdir ./runs/<実験ディレクトリ>/tb_logs --port 6006
   # → ブラウザで http://localhost:6006 を開く
 
+  # === Latentモード (FLUX.1 VAEで事前エンコード済みlatentを使用) ===
+  # 事前エンコード:
+  python encode_latents.py --img_dir ./images512x512 --out_dir ./latents_flux1_256 --img_size 256
+  # latentモードで学習 (img_size/patch_sizeは自動設定):
+  python train.py --latent_dir ./latents_flux1_256 --patch_size 2 --batch_size 64
+
   # 出力先は実行ごとに日時付きディレクトリが自動生成される
   # 明示的に指定も可能:
   python train.py --out_dir ./runs/my_experiment
@@ -71,6 +77,22 @@ class FFHQDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         return img
+
+
+class LatentDataset(Dataset):
+    """事前エンコード済みlatentファイル(.pt)を読むデータセット。"""
+    def __init__(self, root, flip=True):
+        self.paths = sorted(Path(root).glob("*.pt"))
+        self.flip = flip
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        latent = torch.load(self.paths[idx], weights_only=True)
+        if self.flip and torch.rand(1).item() < 0.5:
+            latent = latent.flip(-1)
+        return latent
 
 
 class PatchCropper:
@@ -174,9 +196,10 @@ def update_ema(ema_model, model, decay=0.9999):
         p_ema.lerp_(p.data, 1 - decay)
 
 
-def save_samples(model, step, out_dir, device, n=8):
-    """EMAモデルでフル画像をサンプル生成して保存。"""
-    imgs = sample(model, batch_size=n, steps=10, device=device)
+def save_samples(model, step, out_dir, device, n=8, vae=None, vae_scaling_factor=None):
+    """EMAモデルでサンプル生成して保存。VAE指定時はlatent→画像にデコード。"""
+    imgs = sample(model, batch_size=n, steps=50, device=device,
+                  vae=vae, vae_scaling_factor=vae_scaling_factor)
     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
     imgs = (imgs * 255).byte().cpu()
 
@@ -195,17 +218,42 @@ def train(args):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    transform = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ])
-    dataset = FFHQDataset(args.data_dir, transform=transform)
-    print(f"Dataset: {len(dataset)} images")
+    # データセット: latentモード or ピクセルモード
+    vae = None
+    vae_scaling_factor = None
+    if args.latent_dir:
+        dataset = LatentDataset(args.latent_dir, flip=True)
+        # latentの空間サイズを自動検出
+        sample_latent = torch.load(dataset.paths[0], weights_only=True)
+        latent_channels, latent_h, latent_w = sample_latent.shape
+        args.img_size = latent_h
+        args.in_channels = latent_channels
+        args.patch_size = args.patch_size if args.patch_size <= latent_h else 2
+        print(f"Dataset: {len(dataset)} latents, shape={sample_latent.shape}")
+
+        # サンプル生成用にVAEデコーダを読み込み
+        from diffusers import AutoencoderKL
+        vae = AutoencoderKL.from_pretrained(
+            args.vae_id, subfolder="vae", torch_dtype=torch.float16
+        ).to(device).eval()
+        vae.requires_grad_(False)
+        vae_scaling_factor = vae.config.scaling_factor
+        print(f"VAE decoder loaded: {args.vae_id} (scaling={vae_scaling_factor})")
+    else:
+        transform = transforms.Compose([
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),
+        ])
+        dataset = FFHQDataset(args.data_dir, transform=transform)
+        args.in_channels = 3
+        print(f"Dataset: {len(dataset)} images")
 
     model = PatchDiffusionDiT(
         img_size=args.img_size,
         patch_size=args.patch_size,
+        in_channels=args.in_channels,
         depth=args.depth,
         hidden_size=args.hidden_size,
         num_heads=args.num_heads,
@@ -359,9 +407,11 @@ def train(args):
                 print(f"Saved checkpoint at step {step}")
 
             if step % args.sample_every == 0:
-                save_samples(ema_model, step, out_dir, device)
+                save_samples(ema_model, step, out_dir, device,
+                             vae=vae, vae_scaling_factor=vae_scaling_factor)
                 # TensorBoardにもサンプル画像を追加
-                sample_imgs = sample(ema_model, batch_size=4, steps=10, device=device)
+                sample_imgs = sample(ema_model, batch_size=4, steps=50, device=device,
+                                     vae=vae, vae_scaling_factor=vae_scaling_factor)
                 sample_imgs = (sample_imgs * 0.5 + 0.5).clamp(0, 1)
                 writer.add_images("samples", sample_imgs, step)
                 print(f"Saved samples at step {step}")
@@ -375,7 +425,8 @@ def train(args):
         "optimizer": optimizer.state_dict(),
         "args": vars(args),
     }, out_dir / "ckpt_final.pt")
-    save_samples(ema_model, step, out_dir, device)
+    save_samples(ema_model, step, out_dir, device,
+                 vae=vae, vae_scaling_factor=vae_scaling_factor)
     writer.close()
     print("Training complete.")
 
@@ -385,6 +436,10 @@ if __name__ == "__main__":
 
     # Data
     p.add_argument("--data_dir", type=str, default="./images512x512")
+    p.add_argument("--latent_dir", type=str, default=None,
+                   help="事前エンコード済みlatentディレクトリ (指定時はlatentモードで学習)")
+    p.add_argument("--vae_id", type=str, default="black-forest-labs/FLUX.1-dev",
+                   help="サンプル生成用VAEのHuggingFace ID")
     p.add_argument("--out_dir", type=str,
                    default=f"./runs/patch_dit_ffhq512_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     p.add_argument("--img_size", type=int, default=512)

@@ -301,19 +301,22 @@ def make_position_grid(grid_h, grid_w, offset_h=0, offset_w=0, device="cpu"):
 
 
 @torch.no_grad()
-def sample(model, batch_size=8, steps=10, device="cpu"):
-    """Heun法 (2次ODE solver) でフル画像をサンプリング。"""
+def sample(model, batch_size=8, steps=10, device="cpu", vae=None, vae_scaling_factor=None):
+    """
+    Heun法 (2次ODE solver) でサンプリング。
+    vaeが指定されていれば潜在空間で生成後にデコードして画像を返す。
+    """
     model.eval()
     img_size = model.img_size
     grid = model.grid_size
+    channels = model.in_channels
 
     pos_h, pos_w = make_position_grid(grid, grid, device=device)
     pos_h = pos_h.expand(batch_size, -1)
     pos_w = pos_w.expand(batch_size, -1)
 
-    # t=0(ノイズ) → t=1(データ) の方向で生成 (JiT規約の逆方向)
     dt = 1.0 / steps
-    x = torch.randn(batch_size, 3, img_size, img_size, device=device)
+    x = torch.randn(batch_size, channels, img_size, img_size, device=device)
 
     for i in range(steps):
         t_cur = i / steps
@@ -334,4 +337,8 @@ def sample(model, batch_size=8, steps=10, device="cpu"):
         else:
             x = x_mid
 
+    if vae is not None:
+        x = x / vae_scaling_factor
+        x = vae.decode(x.to(vae.dtype)).sample.float()
+        return x.clamp(-1, 1)
     return x.clamp(-1, 1)
