@@ -144,9 +144,9 @@ class PatchCropper:
             )
             return images, pos_h.expand(B, -1), pos_w.expand(B, -1)
 
-        max_offset = self.img_size - crop_size
-        offsets_y = torch.randint(0, max_offset + 1, (B,))
-        offsets_x = torch.randint(0, max_offset + 1, (B,))
+        max_offset_grid = (self.img_size - crop_size) // p
+        offsets_y = torch.randint(0, max_offset_grid + 1, (B,)) * p
+        offsets_x = torch.randint(0, max_offset_grid + 1, (B,)) * p
 
         patches = []
         all_pos_h = []
@@ -309,7 +309,10 @@ def train(args):
             ema_model.load_state_dict(ckpt["ema_model"])
             optimizer.load_state_dict(ckpt["optimizer"])
             step = ckpt["step"]
-            print(f"  Resumed at step {step}")
+            # resume時に--lrが指定されていたらオプティマイザのlrを上書き
+            for pg in optimizer.param_groups:
+                pg["lr"] = args.lr
+            print(f"  Resumed at step {step}, lr={args.lr}")
         else:
             print(f"Warning: {ckpt_path} not found, training from scratch")
 
