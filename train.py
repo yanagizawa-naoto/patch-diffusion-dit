@@ -278,9 +278,13 @@ def train(args):
     ema_model = deepcopy(model)
     ema_model.requires_grad_(False)
 
-    # lr scaling: JiT方式 (blr × effective_batch / 256)
-    effective_lr = args.lr * args.batch_size / 256
-    print(f"  Effective lr: {args.lr} * {args.batch_size}/256 = {effective_lr:.2e}")
+    # lr scaling
+    if args.lr_scaling:
+        effective_lr = args.lr * args.batch_size / 256
+        print(f"  Effective lr: {args.lr} * {args.batch_size}/256 = {effective_lr:.2e} (JiT scaling)")
+    else:
+        effective_lr = args.lr
+        print(f"  Effective lr: {effective_lr:.2e} (scaling off)")
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=effective_lr, betas=(0.9, 0.95),
@@ -489,8 +493,11 @@ if __name__ == "__main__":
 
     # Training (デフォルトはJiT準拠)
     p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=5e-5,
-                   help="base lr。実効lr = lr * batch_size / 256 (JiT方式)")
+    p.add_argument("--lr", type=float, default=1e-4,
+                   help="学習率。--lr_scalingありの場合 base lr (実効lr = lr * batch/256)")
+    p.add_argument("--lr_scaling", action="store_true", default=False,
+                   help="JiT方式のlr scaling (lr * batch/256)。大バッチ時に使用")
+    p.add_argument("--no_lr_scaling", action="store_false", dest="lr_scaling")
     p.add_argument("--total_steps", type=int, default=200000)
     p.add_argument("--warmup_steps", type=int, default=1000)
     p.add_argument("--grad_clip", type=float, default=0.0,
