@@ -177,17 +177,17 @@ def logit_normal_timestep(batch_size, m=0.0, s=1.0, eps=1e-5, device="cpu"):
     return t.clamp(eps, 1 - eps)
 
 
-def compute_v_loss(model, x_0, t, pos_h, pos_w):
+def compute_v_loss(model, x_0, t, pos_h, pos_w, noise_scale=1.0):
     """
     x-prediction + v-loss を計算。
 
-    順方向: z_t = t * x_0 + (1-t) * ε
+    順方向: z_t = t * x_0 + (1-t) * ε * noise_scale
     モデル: x_pred = model(z_t, t, pos_h, pos_w)
     v_pred = (x_pred - z_t) / (1-t)
-    v_target = x_0 - ε
+    v_target = x_0 - ε * noise_scale
     loss = ||v_target - v_pred||²
     """
-    eps = torch.randn_like(x_0)
+    eps = torch.randn_like(x_0) * noise_scale
     t_expand = t.view(-1, 1, 1, 1)
 
     z_t = t_expand * x_0 + (1 - t_expand) * eps
@@ -195,7 +195,7 @@ def compute_v_loss(model, x_0, t, pos_h, pos_w):
     x_pred = model(z_t, t, pos_h, pos_w)
 
     v_target = x_0 - eps
-    v_pred = (x_pred - z_t) / (1 - t_expand).clamp(min=1e-5)
+    v_pred = (x_pred - z_t) / (1 - t_expand).clamp(min=0.05)
 
     loss = F.mse_loss(v_pred, v_target)
     return loss
@@ -269,6 +269,7 @@ def train(args):
         hidden_size=args.hidden_size,
         num_heads=args.num_heads,
         bottleneck_dim=args.bottleneck_dim,
+        dropout=args.dropout,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
@@ -277,8 +278,13 @@ def train(args):
     ema_model = deepcopy(model)
     ema_model.requires_grad_(False)
 
+    # lr scaling: JiT方式 (blr × effective_batch / 256)
+    effective_lr = args.lr * args.batch_size / 256
+    print(f"  Effective lr: {args.lr} * {args.batch_size}/256 = {effective_lr:.2e}")
+
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.01
+        model.parameters(), lr=effective_lr, betas=(0.9, 0.95),
+        weight_decay=args.weight_decay,
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=args.use_amp)
@@ -309,10 +315,10 @@ def train(args):
             ema_model.load_state_dict(ckpt["ema_model"])
             optimizer.load_state_dict(ckpt["optimizer"])
             step = ckpt["step"]
-            # resume時に--lrが指定されていたらオプティマイザのlrを上書き
+            # resume時にlrを上書き
             for pg in optimizer.param_groups:
-                pg["lr"] = args.lr
-            print(f"  Resumed at step {step}, lr={args.lr}")
+                pg["lr"] = effective_lr
+            print(f"  Resumed at step {step}, lr={effective_lr:.2e}")
         else:
             print(f"Warning: {ckpt_path} not found, training from scratch")
 
@@ -339,7 +345,7 @@ def train(args):
     print(f"  Model: depth={args.depth}, hidden={args.hidden_size}, heads={args.num_heads}, "
           f"patch={args.patch_size}, bottleneck={args.bottleneck_dim}")
     print(f"  Params: {n_params:.1f}M")
-    print(f"  Batch size: {args.batch_size}, lr={args.lr}")
+    print(f"  Batch size: {args.batch_size}, base_lr={args.lr}, effective_lr={effective_lr:.2e}")
     print(f"  Patch Diffusion: sizes={cropper.crop_sizes}, probs={cropper.crop_probs}")
     print(f"  Flow matching: lognorm(m={args.lognorm_m}, s={args.lognorm_s})")
     print(f"  AMP: {args.use_amp}, EMA decay: {args.ema_decay}")
@@ -367,17 +373,19 @@ def train(args):
 
             # Warmup LR
             if step < args.warmup_steps:
-                lr = args.lr * (step + 1) / args.warmup_steps
+                lr = effective_lr * (step + 1) / args.warmup_steps
                 for pg in optimizer.param_groups:
                     pg["lr"] = lr
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=args.use_amp, dtype=torch.bfloat16):
-                loss = compute_v_loss(model, patches, t, pos_h, pos_w)
+                loss = compute_v_loss(model, patches, t, pos_h, pos_w,
+                                     noise_scale=args.noise_scale)
 
             scaler.scale(loss / batch_mul).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            if args.grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             scaler.step(optimizer)
             scaler.update()
 
@@ -465,20 +473,30 @@ if __name__ == "__main__":
     p.add_argument("--num_heads", type=int, default=12)
     p.add_argument("--bottleneck_dim", type=int, default=None,
                    help="None=直接射影, int=ボトルネック次元 (例: 128, 512)")
+    p.add_argument("--dropout", type=float, default=0.0,
+                   help="選択的ドロップアウト率。中間半分のブロックに適用 (JiT-H: 0.2)")
+    p.add_argument("--noise_scale", type=float, default=1.0,
+                   help="ノイズスケーリング。JiT方式: img_size/256 (256:1.0, 512:2.0)")
 
     # Patch Diffusion
     p.add_argument("--real_p", type=float, default=0.5)
 
     # Flow matching
-    p.add_argument("--lognorm_m", type=float, default=0.0)
-    p.add_argument("--lognorm_s", type=float, default=1.0)
+    p.add_argument("--lognorm_m", type=float, default=-0.8,
+                   help="logit-normal位置パラメータ (JiT: -0.8)")
+    p.add_argument("--lognorm_s", type=float, default=0.8,
+                   help="logit-normalスケールパラメータ (JiT: 0.8)")
 
-    # Training
-    p.add_argument("--batch_size", type=int, default=24)
-    p.add_argument("--lr", type=float, default=1e-4)
+    # Training (デフォルトはJiT準拠)
+    p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--lr", type=float, default=5e-5,
+                   help="base lr。実効lr = lr * batch_size / 256 (JiT方式)")
     p.add_argument("--total_steps", type=int, default=200000)
     p.add_argument("--warmup_steps", type=int, default=1000)
-    p.add_argument("--grad_clip", type=float, default=1.0)
+    p.add_argument("--grad_clip", type=float, default=0.0,
+                   help="0=クリップなし (JiTデフォルト)")
+    p.add_argument("--weight_decay", type=float, default=0.0,
+                   help="JiTデフォルト: 0.0")
     p.add_argument("--ema_decay", type=float, default=0.9999)
     p.add_argument("--use_amp", action="store_true", default=True)
     p.add_argument("--no_amp", action="store_false", dest="use_amp")

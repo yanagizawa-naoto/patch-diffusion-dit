@@ -141,13 +141,14 @@ class Attention(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, dim, num_heads):
+    def __init__(self, dim, num_heads, dropout=0.0):
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = Attention(dim, num_heads)
         self.norm2 = RMSNorm(dim)
         self.ffn = SwiGLUFFN(dim)
         self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
+        self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x, c, cos, sin):
         mod = self.adaLN(c).unsqueeze(1)
@@ -155,10 +156,10 @@ class DiTBlock(nn.Module):
             mod.chunk(6, dim=-1)
 
         h = self.norm1(x) * (1 + scale_msa) + shift_msa
-        x = x + gate_msa * self.attn(h, cos, sin)
+        x = x + gate_msa * self.drop(self.attn(h, cos, sin))
 
         h = self.norm2(x) * (1 + scale_mlp) + shift_mlp
-        x = x + gate_mlp * self.ffn(h)
+        x = x + gate_mlp * self.drop(self.ffn(h))
         return x
 
 
@@ -182,6 +183,9 @@ class PatchDiffusionDiT(nn.Module):
                         None: 直接射影 (patch_pixels → hidden_size、ボトルネックなし)
                         int:  ボトルネック経由 (patch_pixels → bottleneck → hidden_size)
                         例: None, 128, 256, 512
+        dropout:        選択的ドロップアウト率。中間半分のブロックにのみ適用 (JiT準拠)。
+                        0.0: ドロップアウトなし (JiT-B/L)
+                        0.2: JiT-H (depth=32) の設定
 
     制約まとめ:
         - img_size % patch_size == 0
@@ -198,6 +202,7 @@ class PatchDiffusionDiT(nn.Module):
         hidden_size=768,
         num_heads=12,
         bottleneck_dim=128,
+        dropout=0.0,
     ):
         super().__init__()
         assert img_size % patch_size == 0, \
@@ -218,9 +223,11 @@ class PatchDiffusionDiT(nn.Module):
         )
         self.t_embed = TimestepEmbedder(hidden_size)
 
-        self.blocks = nn.ModuleList(
-            [DiTBlock(hidden_size, num_heads) for _ in range(depth)]
-        )
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_size, num_heads,
+                     dropout=dropout if depth // 4 <= i < depth * 3 // 4 else 0.0)
+            for i in range(depth)
+        ])
 
         self.final_norm = RMSNorm(hidden_size)
         self.final_adaLN = nn.Sequential(
@@ -325,14 +332,14 @@ def sample(model, batch_size=8, steps=10, device="cpu", vae=None, vae_scaling_fa
 
         # x_pred from model, then derive velocity
         x_pred = model(x, t_batch, pos_h, pos_w)
-        v = (x_pred - x) / max(1 - t_cur, 1e-5)
+        v = (x_pred - x) / max(1 - t_cur, 0.05)
 
         # Heun step
         x_mid = x + v * dt
         if i < steps - 1:
             t_mid = torch.full((batch_size,), t_next, device=device)
             x_pred_mid = model(x_mid, t_mid, pos_h, pos_w)
-            v_mid = (x_pred_mid - x_mid) / max(1 - t_next, 1e-5)
+            v_mid = (x_pred_mid - x_mid) / max(1 - t_next, 0.05)
             x = x + 0.5 * (v + v_mid) * dt
         else:
             x = x_mid
