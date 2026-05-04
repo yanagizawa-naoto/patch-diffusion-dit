@@ -289,6 +289,32 @@ def train(args):
     ema_model = deepcopy(model)
     ema_model.requires_grad_(False)
 
+    # Liger-Kernel RMSNorm
+    if args.liger:
+        from liger_kernel.ops.rms_norm import LigerRMSNormFunction
+        from model import RMSNorm as OrigRMSNorm
+
+        class LigerRMSNorm(nn.Module):
+            def __init__(self, dim, eps=1e-6):
+                super().__init__()
+                self.weight = nn.Parameter(torch.ones(dim))
+                self.eps = eps
+
+            @torch._dynamo.disable
+            def forward(self, x):
+                return LigerRMSNormFunction.apply(x, self.weight, self.eps)
+
+        for name, module in list(model.named_modules()):
+            if isinstance(module, OrigRMSNorm):
+                parts = name.split('.')
+                parent = model
+                for p in parts[:-1]:
+                    parent = getattr(parent, p)
+                ln = LigerRMSNorm(module.weight.shape[0], module.eps)
+                ln.weight = module.weight
+                setattr(parent, parts[-1], ln)
+        print("  Liger RMSNorm enabled")
+
     # FP8 (学習モデルのみ、0-init層は除外)
     if args.fp8:
         from torchao.float8 import convert_to_float8_training, Float8LinearConfig
@@ -553,6 +579,8 @@ if __name__ == "__main__":
     p.add_argument("--ema_decay", type=float, default=0.9999)
     p.add_argument("--use_amp", action="store_true", default=True)
     p.add_argument("--no_amp", action="store_false", dest="use_amp")
+    p.add_argument("--liger", action="store_true", default=False,
+                   help="Liger-Kernel RMSNorm (liger-kernel必要)")
     p.add_argument("--fp8", action="store_true", default=False,
                    help="FP8 Linear (torchao)。0-init層は自動除外。torch nightly + torchao必要")
     p.add_argument("--compile", action="store_true", default=False,
