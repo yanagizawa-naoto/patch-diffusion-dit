@@ -363,7 +363,9 @@ def train(args):
             weight_decay=args.weight_decay,
         )
 
-    scaler = torch.amp.GradScaler("cuda", enabled=args.use_amp)
+    # BF16ではGradScaler不要。8bit Adamとも非互換
+    use_scaler = args.use_amp and not args.optim_8bit
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     cropper = PatchCropper(args.img_size, args.patch_size, args.real_p)
 
     loader = DataLoader(
@@ -387,9 +389,29 @@ def train(args):
         if ckpt_path.exists():
             print(f"Resuming from {ckpt_path}")
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-            model.load_state_dict(ckpt["model"])
+            # compile後のモデルは _orig_mod. prefix がつくので変換
+            def load_compat(target, state_dict):
+                try:
+                    target.load_state_dict(state_dict)
+                except RuntimeError:
+                    # prefix追加/除去を試す
+                    new_sd = {}
+                    for k, v in state_dict.items():
+                        new_sd["_orig_mod." + k] = v
+                    try:
+                        target.load_state_dict(new_sd)
+                    except RuntimeError:
+                        new_sd2 = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+                        target.load_state_dict(new_sd2)
+            load_compat(model, ckpt["model"])
             ema_model.load_state_dict(ckpt["ema_model"])
-            optimizer.load_state_dict(ckpt["optimizer"])
+            if not args.optim_8bit:
+                try:
+                    optimizer.load_state_dict(ckpt["optimizer"])
+                except (ValueError, KeyError, RuntimeError):
+                    print("  Warning: optimizer state incompatible, starting fresh optimizer")
+            else:
+                print("  Skipping optimizer state (8bit Adam is incompatible with saved AdamW state)")
             step = ckpt["step"]
             # resume時にlrを上書き
             for pg in optimizer.param_groups:
