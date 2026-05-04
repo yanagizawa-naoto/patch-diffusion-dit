@@ -275,8 +275,18 @@ def train(args):
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Model params: {n_params:.1f}M")
 
+    # EMAはFP8/compile前に作成 (推論用なのでBF16のまま)
     ema_model = deepcopy(model)
     ema_model.requires_grad_(False)
+
+    # FP8 / torch.compile (学習モデルのみ、併用はnanになるため排他的)
+    if args.fp8:
+        from torchao.float8 import convert_to_float8_training, Float8LinearConfig
+        convert_to_float8_training(model, config=Float8LinearConfig())
+        print("  FP8 Linear enabled (requires torch nightly + torchao)")
+    if args.compile:
+        model = torch.compile(model, dynamic=True)
+        print("  torch.compile enabled (dynamic=True)")
 
     # lr scaling
     if args.lr_scaling:
@@ -507,6 +517,10 @@ if __name__ == "__main__":
     p.add_argument("--ema_decay", type=float, default=0.9999)
     p.add_argument("--use_amp", action="store_true", default=True)
     p.add_argument("--no_amp", action="store_false", dest="use_amp")
+    p.add_argument("--fp8", action="store_true", default=False,
+                   help="FP8 Linear (torchao)。torch.compileと併用推奨")
+    p.add_argument("--compile", action="store_true", default=False,
+                   help="torch.compile。FP8と併用で最大効果")
     p.add_argument("--num_workers", type=int, default=4)
 
     # Resume
