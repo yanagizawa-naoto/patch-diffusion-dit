@@ -36,6 +36,16 @@ Patch Diffusion × JiT × MMDiT ハイブリッドモデルの訓練スクリプ
   # latentモードで学習 (img_size/patch_sizeは自動設定):
   python train.py --latent_dir ./latents_flux1_256 --patch_size 2 --batch_size 64
 
+  # === 高速化オプション ===
+  # compile単体 (2.0x):
+  python train.py --compile
+  # max-autotune + 8bit Adam (2.3x、初回コンパイルに数分):
+  python train.py --compile --max_autotune --optim_8bit
+  # FP8 + compile (2.5x、torch nightly + torchao必要):
+  python train.py --fp8 --compile
+  # 全部盛り:
+  python train.py --fp8 --compile --max_autotune --optim_8bit
+
   # 出力先は実行ごとに日時付きディレクトリが自動生成される
   # 明示的に指定も可能:
   python train.py --out_dir ./runs/my_experiment
@@ -279,14 +289,32 @@ def train(args):
     ema_model = deepcopy(model)
     ema_model.requires_grad_(False)
 
-    # FP8 / torch.compile (学習モデルのみ、併用はnanになるため排他的)
+    # FP8 (学習モデルのみ、0-init層は除外)
     if args.fp8:
         from torchao.float8 import convert_to_float8_training, Float8LinearConfig
+        zero_init_layers = {}
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear) and torch.all(module.weight == 0):
+                zero_init_layers[name] = deepcopy(module)
         convert_to_float8_training(model, config=Float8LinearConfig())
-        print("  FP8 Linear enabled (requires torch nightly + torchao)")
+        for name, orig in zero_init_layers.items():
+            parts = name.split('.')
+            parent = model
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], orig.to(device))
+        print("  FP8 Linear enabled (0-init layers excluded, requires torch nightly + torchao)")
+
+    # torch.compile
     if args.compile:
-        model = torch.compile(model, dynamic=True)
-        print("  torch.compile enabled (dynamic=True)")
+        if args.max_autotune:
+            torch._inductor.config.coordinate_descent_tuning = True
+            torch._inductor.config.conv_1x1_as_mm = True
+            model = torch.compile(model, mode="max-autotune", dynamic=True)
+            print("  torch.compile enabled (max-autotune, dynamic=True)")
+        else:
+            model = torch.compile(model, dynamic=True)
+            print("  torch.compile enabled (dynamic=True)")
 
     # lr scaling
     if args.lr_scaling:
@@ -296,10 +324,18 @@ def train(args):
         effective_lr = args.lr
         print(f"  Effective lr: {effective_lr:.2e} (scaling off)")
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=effective_lr, betas=(0.9, 0.95),
-        weight_decay=args.weight_decay,
-    )
+    if args.optim_8bit:
+        import bitsandbytes as bnb
+        optimizer = bnb.optim.Adam8bit(
+            model.parameters(), lr=effective_lr, betas=(0.9, 0.95),
+            weight_decay=args.weight_decay,
+        )
+        print("  8-bit Adam enabled (bitsandbytes)")
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=effective_lr, betas=(0.9, 0.95),
+            weight_decay=args.weight_decay,
+        )
 
     scaler = torch.amp.GradScaler("cuda", enabled=args.use_amp)
     cropper = PatchCropper(args.img_size, args.patch_size, args.real_p)
@@ -518,9 +554,13 @@ if __name__ == "__main__":
     p.add_argument("--use_amp", action="store_true", default=True)
     p.add_argument("--no_amp", action="store_false", dest="use_amp")
     p.add_argument("--fp8", action="store_true", default=False,
-                   help="FP8 Linear (torchao)。torch.compileと併用推奨")
+                   help="FP8 Linear (torchao)。0-init層は自動除外。torch nightly + torchao必要")
     p.add_argument("--compile", action="store_true", default=False,
-                   help="torch.compile。FP8と併用で最大効果")
+                   help="torch.compile (dynamic=True)")
+    p.add_argument("--max_autotune", action="store_true", default=False,
+                   help="torch.compile mode=max-autotune。初回コンパイルに数分かかる")
+    p.add_argument("--optim_8bit", action="store_true", default=False,
+                   help="8-bit Adam (bitsandbytes)。optimizer転送量を4分の1に削減")
     p.add_argument("--num_workers", type=int, default=4)
 
     # Resume

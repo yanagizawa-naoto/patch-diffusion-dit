@@ -77,6 +77,46 @@ FP8でmatmulが半分になっても:
   全体: 176ms → 163ms = 8%改善のみ
 ```
 
+## 最適な高速化の組み合わせ (RTX 6000 Ada, depth=12, batch=128)
+
+### ベンチマーク結果
+```
+BF16:                          346 ms/step,  370 img/s (1.00x)
+Liger RMSNorm (no compile):   248 ms/step,  516 img/s (1.39x)
+compile(dynamic=True):         170 ms/step,  754 img/s (2.04x)
+compile + 8bit Adam:           170 ms/step,  753 img/s (2.03x)
+compile(max-autotune):         161 ms/step,  796 img/s (2.15x)
+FP8 + compile:                 163 ms/step,  786 img/s (2.12x)
+max-autotune + 8bit Adam:      150 ms/step,  853 img/s (2.31x) ← 最速
+```
+
+### なぜmax-autotune + 8bit Adamが最速か
+- max-autotune: Tritonカーネルの最適パラメータ(BLOCK_M/N/K等)を自動探索
+- 8bit Adam: optimizer stateの転送量を4分の1に削減 → メモリ帯域ボトルネック緩和
+- FP8: matmulは14%しかないのでオーバーヘッドと相殺、compile単体より遅い
+
+### 8bit Adamの品質検証
+100ステップでBF16 AdamWとの差: 最大0.01 (許容範囲)
+
+### プロファイリング結果 (compile後)
+```
+GEMM (matmul):         44% ← FP8の対象だが全体の半分以下
+Triton融合カーネル:     17% ← compile済み、追加最適化困難
+Flash Attention:        4.5%
+メモリ転送/その他:      34.5% ← 8bit Adamで一部削減
+```
+
+### Liger-Kernelの状況
+- RMSNorm 7x高速化の実績あり
+- ただしtorch.compileと併用不可 (SubgraphTracerエラー)
+- compileなしだと1.39x (compileの2.04xに負ける)
+- 将来torch.compile互換になれば有望
+
+### Fused Optimizer-in-Backward
+- PyTorch公式チュートリアルに記載
+- hookのreturn typeエラーで動作せず
+- 将来のPyTorchバージョンで修正される可能性
+
 ## 今後FP8で圧勝するための条件
 1. 大モデル (depth=24+, hidden=1024+): matmul比率が上がる
 2. 大バッチ (256+): matmulが支配的になる
