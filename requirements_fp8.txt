@@ -1,0 +1,11 @@
+# FP8 + compile + 8bit Adam 高速化環境
+# この組み合わせで動作確認済み (RTX 6000 Ada, sm89)
+#
+# インストール:
+#   pip install torch==2.12.0.dev20260407+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128
+#   pip install -r requirements_fp8.txt
+
+torchao==0.17.0
+bitsandbytes==0.49.2
+torchvision==0.27.0.dev20260407+cu128
+tensorboard==2.20.0
