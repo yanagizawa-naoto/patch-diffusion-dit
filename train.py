@@ -381,6 +381,7 @@ def train(args):
     step = 0
     epoch = 0
     log_loss = 0.0
+    log_step_time = 0.0
     log_count = 0
 
     # Resume
@@ -424,7 +425,7 @@ def train(args):
     loss_log_path = out_dir / "loss_log.csv"
     if step == 0 or not loss_log_path.exists():
         with open(loss_log_path, "w", newline="") as f:
-            csv.writer(f).writerow(["step", "loss", "crop_size", "lr", "elapsed_sec"])
+            csv.writer(f).writerow(["step", "loss", "crop_size", "lr", "elapsed_sec", "step_time_ms"])
 
     # TensorBoard
     writer = SummaryWriter(log_dir=str(out_dir / "tb_logs"))
@@ -456,6 +457,7 @@ def train(args):
                 break
 
             images = images.to(device, non_blocking=True)
+            step_start = time.time()
 
             crop_size = cropper.sample_crop_size()
             batch_mul = cropper.batch_muls[crop_size]
@@ -489,30 +491,38 @@ def train(args):
 
             update_ema(ema_model, model, decay=args.ema_decay)
 
+            step_time = time.time() - step_start
             log_loss += loss.item()
+            log_step_time += step_time
             log_count += 1
             step += 1
 
             if step % args.log_every == 0:
                 avg_loss = log_loss / log_count
-                elapsed = time.time() - start_time
+                avg_step_ms = log_step_time / log_count * 1000
                 cur_lr = optimizer.param_groups[0]["lr"]
-                imgs_per_sec = step * args.batch_size / elapsed
+                cur_ips = args.batch_size / (log_step_time / log_count)
                 print(
                     f"step={step:>7d}  loss={avg_loss:.4f}  "
                     f"crop={crop_size:>3d}  "
                     f"lr={cur_lr:.2e}  "
-                    f"img/s={imgs_per_sec:.1f}"
+                    f"step_time={avg_step_ms:.0f}ms  "
+                    f"img/s={cur_ips:.0f}"
                 )
+                elapsed = time.time() - start_time
                 with open(loss_log_path, "a", newline="") as f:
                     csv.writer(f).writerow([
                         step, f"{avg_loss:.6f}", crop_size,
                         f"{cur_lr:.2e}", f"{elapsed:.1f}",
+                        f"{avg_step_ms:.1f}",
                     ])
                 writer.add_scalar("loss/train", avg_loss, step)
                 writer.add_scalar("loss/crop_size", crop_size, step)
                 writer.add_scalar("lr", cur_lr, step)
+                writer.add_scalar("perf/step_time_ms", avg_step_ms, step)
+                writer.add_scalar("perf/img_per_sec", cur_ips, step)
                 log_loss = 0.0
+                log_step_time = 0.0
                 log_count = 0
 
             if step % args.save_every == 0:
