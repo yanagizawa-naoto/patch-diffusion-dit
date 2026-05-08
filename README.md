@@ -101,6 +101,12 @@ Both embeddings are zero-initialized for backward compatibility with pre-trained
 <img src="assets/loss_curve.png" width="800">
 </p>
 
+**Generation quality over training** (5K → 530K steps, 4 samples per checkpoint):
+
+<p align="center">
+<img src="assets/training_progression.png" width="800">
+</p>
+
 **Finding**: Loss continued to decrease after 400K steps (0.0225 → 0.0224), but
 **generation quality did not visibly improve**. The model was spending compute on
 imperceptible high-frequency details. This motivated DPO as a more efficient path

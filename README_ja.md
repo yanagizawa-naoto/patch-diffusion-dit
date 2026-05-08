@@ -101,6 +101,12 @@
 <img src="assets/loss_curve.png" width="800">
 </p>
 
+**学習中の生成品質の推移**（5K → 530Kステップ、各チェックポイント4サンプル）:
+
+<p align="center">
+<img src="assets/training_progression.png" width="800">
+</p>
+
 **発見**: 40万ステップ以降もlossは減少し続けた（0.0225 → 0.0224）が、
 **生成品質は目に見えて改善しなかった**。人間が知覚できない高周波の微細な
 ディテールに計算を費やしていた。これがDPOへの動機となった。
