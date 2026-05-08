@@ -1,5 +1,7 @@
 # PatchDiffusionDiT: Pixel-Space Flow Matching with DPO and Multi-Task Segmentation
 
+**English** | [日本語](README_ja.md)
+
 A 130M-parameter pixel-space Diffusion Transformer trained from scratch on FFHQ + CelebA-HQ (100K face images, 512x512).
 After pre-training, the model is aligned with human preferences via **Diffusion-DPO** (adapted for Flow Matching), and extended to **semantic segmentation** through multi-task continued pre-training with only 104 annotated images.
 
