@@ -74,7 +74,7 @@ FFHQ + CelebA-HQ（10万枚の顔画像、512×512）でフルスクラッチ学
 - **手法**: Rectified Flowによる Flow Matching、v-loss、logit-normalタイムステップサンプリング
 - **Patch Diffusion**: 50%の確率で半解像度のランダムクロップ（256×256）で学習
 - **学習**: 53万ステップ、バッチサイズ128、lr=1e-4、AdamW 8bit、BF16 + torch.compile
-- **ハードウェア**: RTX 6000 Ada 48GB（約122 img/s）
+- **ハードウェア**: RTX 6000 Ada 48GB（約364 img/s、10Kステップあたり約58分）
 
 <p align="center">
 <img src="assets/loss_curve.png" width="800">

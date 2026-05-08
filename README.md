@@ -74,7 +74,7 @@ Both embeddings are zero-initialized for backward compatibility with pre-trained
 - **Method**: Flow Matching with Rectified Flow, v-loss, logit-normal timestep sampling
 - **Patch Diffusion**: 50% probability of training on half-resolution random crops (256x256)
 - **Training**: 530K steps, batch size 128, lr=1e-4, AdamW 8-bit, BF16 + torch.compile
-- **Hardware**: RTX 6000 Ada 48GB (~122 img/s)
+- **Hardware**: RTX 6000 Ada 48GB (~364 img/s, ~58 min per 10K steps)
 
 <p align="center">
 <img src="assets/loss_curve.png" width="800">
