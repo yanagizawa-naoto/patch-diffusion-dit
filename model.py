@@ -33,6 +33,47 @@ class SwiGLUFFN(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
+class MoEFFN(nn.Module):
+    """Mixture of Experts SwiGLU FFN。各トークンがtop_k個のexpertのみ使う。"""
+    def __init__(self, dim, num_experts=8, top_k=2):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        hidden = (int(dim * 8 / 3) + 63) // 64 * 64
+        self.router = nn.Linear(dim, num_experts, bias=False)
+        self.experts = nn.ModuleList([
+            nn.ModuleDict({
+                'w1': nn.Linear(dim, hidden, bias=False),
+                'w2': nn.Linear(hidden, dim, bias=False),
+                'w3': nn.Linear(dim, hidden, bias=False),
+            })
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x):
+        B, N, D = x.shape
+        x_flat = x.reshape(-1, D)
+
+        logits = self.router(x_flat)
+        weights, indices = torch.topk(logits, self.top_k, dim=-1)
+        weights = F.softmax(weights, dim=-1)
+
+        output = torch.zeros_like(x_flat)
+        for k in range(self.top_k):
+            idx = indices[:, k]
+            w = weights[:, k].unsqueeze(-1)
+            for e in range(self.num_experts):
+                mask = idx == e
+                if not mask.any():
+                    continue
+                x_e = x_flat[mask]
+                exp = self.experts[e]
+                y_e = exp['w2'](F.silu(exp['w1'](x_e)) * exp['w3'](x_e))
+                output[mask] += w[mask] * y_e
+
+        return output.reshape(B, N, D)
+
+
 class PatchEmbed(nn.Module):
     """
     bottleneck_dim=None: 直接射影 (patch_pixels → hidden_size)
@@ -141,12 +182,15 @@ class Attention(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, dim, num_heads, dropout=0.0):
+    def __init__(self, dim, num_heads, dropout=0.0, num_experts=0, top_k=2):
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = Attention(dim, num_heads)
         self.norm2 = RMSNorm(dim)
-        self.ffn = SwiGLUFFN(dim)
+        if num_experts > 0:
+            self.ffn = MoEFFN(dim, num_experts=num_experts, top_k=top_k)
+        else:
+            self.ffn = SwiGLUFFN(dim)
         self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
         self.drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
@@ -186,6 +230,11 @@ class PatchDiffusionDiT(nn.Module):
         dropout:        選択的ドロップアウト率。中間半分のブロックにのみ適用 (JiT準拠)。
                         0.0: ドロップアウトなし (JiT-B/L)
                         0.2: JiT-H (depth=32) の設定
+        num_experts:    MoE expert数。0=MoEなし(通常のSwiGLU FFN)。
+                        8: 8 experts (パラメータ~5倍、計算量はtop_k/num_experts)
+                        例: num_experts=8, top_k=2 → FFN計算量1/4、パラメータ~5倍
+        top_k:          各トークンが使うexpert数。num_experts > 0 の時のみ有効。
+                        2: DiT-MoE準拠 (top-2 routing)
 
     制約まとめ:
         - img_size % patch_size == 0
@@ -203,6 +252,8 @@ class PatchDiffusionDiT(nn.Module):
         num_heads=12,
         bottleneck_dim=128,
         dropout=0.0,
+        num_experts=0,
+        top_k=2,
     ):
         super().__init__()
         assert img_size % patch_size == 0, \
@@ -223,9 +274,13 @@ class PatchDiffusionDiT(nn.Module):
         )
         self.t_embed = TimestepEmbedder(hidden_size)
 
+        self.task_emb = nn.Embedding(2, hidden_size)
+        self.modality_emb = nn.Embedding(2, hidden_size)
+
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_size, num_heads,
-                     dropout=dropout if depth // 4 <= i < depth * 3 // 4 else 0.0)
+                     dropout=dropout if depth // 4 <= i < depth * 3 // 4 else 0.0,
+                     num_experts=num_experts, top_k=top_k)
             for i in range(depth)
         ])
 
@@ -254,6 +309,8 @@ class PatchDiffusionDiT(nn.Module):
         nn.init.zeros_(self.final_adaLN[-1].bias)
         nn.init.zeros_(self.final_proj.weight)
         nn.init.zeros_(self.final_proj.bias)
+        nn.init.zeros_(self.task_emb.weight)
+        nn.init.zeros_(self.modality_emb.weight)
 
     def unpatchify(self, x, h, w):
         p = self.patch_size
@@ -262,30 +319,49 @@ class PatchDiffusionDiT(nn.Module):
         x = x.reshape(x.shape[0], gh, gw, p, p, c)
         return x.permute(0, 5, 1, 3, 2, 4).reshape(x.shape[0], c, h, w)
 
-    def forward(self, x, t, pos_h, pos_w):
+    def _backbone(self, tokens, c, pos_h, pos_w):
+        """compile対象のトランスフォーマー本体。"""
+        cos, sin = compute_rope_2d(self.head_dim, pos_h, pos_w)
+        for block in self.blocks:
+            tokens = block(tokens, c, cos, sin)
+        shift, scale = self.final_adaLN(c).unsqueeze(1).chunk(2, dim=-1)
+        tokens = self.final_norm(tokens) * (1 + scale) + shift
+        tokens = self.final_proj(tokens)
+        return tokens
+
+    def forward(self, x, t, pos_h, pos_w, cond_x=None, task_id=None):
         """
         Args:
-            x: (B, 3, H, W) ノイズ付き画像 [-1, 1]
+            x: (B, 3, H, W) ノイズ付き画像/マスク [-1, 1]
             t: (B,) タイムステップ [0, 1]
             pos_h: (B, N) 各パッチの行位置 (グリッド座標)
             pos_w: (B, N) 各パッチの列位置
+            cond_x: (B, 3, H, W) 条件画像 (セグメンテーション時)。Noneなら無条件生成。
+            task_id: (B,) タスクID (0=顔生成, 1=セグメンテーション)。Noneなら0扱い。
         Returns:
-            x_pred: (B, 3, H, W) クリーン画像の予測
+            x_pred: (B, 3, H, W) クリーン画像/マスクの予測
         """
         B, C, H, W = x.shape
 
-        x = self.patch_embed(x)
         c = self.t_embed(t)
-        cos, sin = compute_rope_2d(self.head_dim, pos_h, pos_w)
+        if task_id is not None:
+            c = c + self.task_emb(task_id)
 
-        for block in self.blocks:
-            x = block(x, c, cos, sin)
+        target_tokens = self.patch_embed(x) + self.modality_emb.weight[1]
 
-        shift, scale = self.final_adaLN(c).unsqueeze(1).chunk(2, dim=-1)
-        x = self.final_norm(x) * (1 + scale) + shift
-        x = self.final_proj(x)
+        if cond_x is not None:
+            cond_tokens = self.patch_embed(cond_x) + self.modality_emb.weight[0]
+            tokens = torch.cat([cond_tokens, target_tokens], dim=1)
+            pos_h = torch.cat([pos_h, pos_h], dim=1)
+            pos_w = torch.cat([pos_w, pos_w], dim=1)
+            N_target = target_tokens.shape[1]
 
-        return self.unpatchify(x, H, W)
+            out = self._backbone(tokens, c, pos_h, pos_w)
+            out = out[:, -N_target:]
+        else:
+            out = self._backbone(target_tokens, c, pos_h, pos_w)
+
+        return self.unpatchify(out, H, W)
 
 
 def make_position_grid(grid_h, grid_w, offset_h=0, offset_w=0, device="cpu"):

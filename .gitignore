@@ -1,26 +1,64 @@
 # Datasets
 images512x512/
 images1024x1024/
+images256_ffhq_celebahq/
 CelebAMask-HQ/
 CelebAMask-HQ.zip
 celebamask_hq_identity_disjoint/
 celebamask_hq_15class/
 identity_CelebA.txt
 ffhq-dataset/
+latents_flux1_256/
 
 # Training outputs
-runs/*/ckpt_*.pt
-runs/*/samples/
-runs/*/tb_logs/
+runs/
+runs_b300/
+runs_gh200/
+dpo_data/
+
+# Checkpoints
+*.pt
+
+# Python
 __pycache__/
 *.pyc
-
-# Logs
-*.log
+*.pyo
 
 # Environment
-.venv_auto
+.venv_auto/
+venv*/
+*.log
 
-# Screenshots
-*.png
-!/notes/*.png
+# OS / Editor
+.DS_Store
+*.swp
+*~
+
+# Personal screenshots
+スクリーンショット*
+
+# Session files
+claude-conversation-*.md
+conversation_before_compaction.md
+papers_*.md
+2026-05-05-*.txt
+
+# Benchmark/sync scripts
+bench_*.py
+bench_*.sh
+sync_*.sh
+setup_*.sh
+
+# Videos (GIFs in assets/ instead)
+*.mp4
+
+# Misc
+/tmp/
+download_data.py
+
+# Keep assets
+!assets/*.png
+!assets/*.gif
+!assets/*.csv
+!notes/*.png
+!notes/*.md

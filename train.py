@@ -36,15 +36,76 @@ Patch Diffusion × JiT × MMDiT ハイブリッドモデルの訓練スクリプ
   # latentモードで学習 (img_size/patch_sizeは自動設定):
   python train.py --latent_dir ./latents_flux1_256 --patch_size 2 --batch_size 64
 
-  # === 高速化オプション ===
-  # compile単体 (2.0x):
-  python train.py --compile
-  # max-autotune + 8bit Adam (2.3x、初回コンパイルに数分):
-  python train.py --compile --max_autotune --optim_8bit
-  # FP8 + compile (2.5x、torch nightly + torchao必要):
-  python train.py --fp8 --compile
-  # 全部盛り:
-  python train.py --fp8 --compile --max_autotune --optim_8bit
+  # === GPU別 推奨設定 ===
+  #
+  # RTX 6000 Ada / L40S (48GB GDDR6, 960GB/s) — 最速実測: 522ms/step, 122 img/s
+  python train.py --batch_size 64 --lr 2e-4 \
+      --compile --max_autotune --optim_8bit --liger --preload
+  #   ※ FP8は帯域不足で効果なし。preloadにRAM 20-55GB必要
+  #
+  # RTX PRO 6000 Blackwell (96GB GDDR7, 1792GB/s)
+  python train.py --batch_size 128 --lr 2.83e-4 \
+      --compile --max_autotune --optim_8bit --fp8 --preload
+  #   ※ 帯域1.87xでFP8が効き始める。96GBでbatch=128可能
+  #   ※ --ligerは要再検証（GPU変わるとcompileとの相性が変わりうる）
+  #
+  # H100 SXM (80GB HBM3, 3.35TB/s) — FP8で15-25%高速化
+  python train.py --batch_size 128 --lr 2.83e-4 \
+      --compile --max_autotune --optim_8bit --fp8 --preload
+  #   ※ HBM帯域でFP8の演算2倍が活きる。コスパ最良 (Vast.ai $1.4/hr)
+  #
+  # B200 / GB200 (180GB HBM3e, 8TB/s) — FP4/FP8対応 (sm_100a)
+  # B300 / GB300 (262GB HBM3e, 8TB/s) — FP4/FP8対応 (compute_100f)
+  #   D < 2048 の場合 (現在の130Mモデル等):
+  python train.py --batch_size 512 --lr 5.66e-4 \
+      --compile --max_autotune --optim_8bit --fp8 --preload
+  #   ※ FP8が安定して+9-14%。FP4はD<2048で逆効果
+  #
+  #   D ≥ 2048 の場合 (2.5B+モデル):
+  python train.py --batch_size 256 --lr 4e-4 \
+      --compile --max_autotune --optim_8bit --fp4 --preload \
+      --hidden_size 2048 --depth 32 --num_heads 32
+  #   ※ D=2048 batch=256: FP4 1.42x > FP8 1.34x (B300実測)
+  #   ※ D=3072 batch=128: FP4 1.62x > FP8 1.42x (B300実測)
+  #   ※ TEソースビルド必要 (notes/b300_fp4_setup.md 参照)
+  #
+  # === 各フラグの説明 ===
+  # --compile --max_autotune : kernel fusion + autotune。全GPUで必須 (1.5-2.3x)
+  # --optim_8bit            : 8bit Adam。VRAM節約 + 微小な帯域改善
+  # --liger                 : Liger RMSNorm。RTX 6000 Adaで実証済み、他GPUは要検証
+  # --preload               : 全画像をRAMにプリロード。RAM 20-55GB必要。I/O排除で15%改善
+  # --fp8                   : FP8 matmul (torchao)。H100以上で有効。sm_89+必要
+  #                           注意: batch*seq < 16384 でNaN多発。batch=64+推奨
+  # --fp4                   : FP4 training (TE NVFP4)。B200/B300のみ (sm_100a/compute_100f)
+  #                           TEソースビルド必要。--fp8と排他
+  #
+  # === FP8 vs FP4 使い分けガイド (B300実測ベース) ===
+  #
+  # FP8 (--fp8):
+  #   - 全モデルサイズで安定して+9-14%高速化
+  #   - D(hidden_size)やbatch sizeに依存しない
+  #   - H100以上のGPUで有効 (GDDR6のRTX 6000 Adaでは効果なし)
+  #   - 推奨: D<2048 のモデル、または確実に速度改善したい場合
+  #
+  # FP4 (--fp4):
+  #   - D(hidden_size) ≥ 2048 かつ 大batch で FP8を超える
+  #   - D=768 ではbatchをいくら増やしても BF16より遅い
+  #   - D=2048, batch=256: FP4 1.42x > FP8 1.34x (B300実測)
+  #   - D=3072, batch=128: FP4 1.62x > FP8 1.42x (B300実測)
+  #   - B200/B300のみ対応 (RTX 50xxは共有メモリ不足で不可)
+  #   - 推奨: D≥2048 の大モデルをB200/B300で学習する場合のみ
+  #
+  # 判断フロー:
+  #   D < 2048 → --fp8 を使う
+  #   D ≥ 2048 かつ B200/B300 → --fp4 を使う
+  #   GDDR6 GPU (RTX 6000 Ada等) → FP8/FP4ともに効果なし、BF16+compile
+  #
+  # === lr scaling ガイド ===
+  # base_lr=1e-4 (batch=32基準)
+  # batch=64:  lr=2e-4    (linear: 1e-4 * 64/32)
+  # batch=128: lr=2.83e-4 (sqrt:   1e-4 * sqrt(128/32))  ※保守的
+  # batch=256: lr=4e-4    (sqrt:   1e-4 * sqrt(256/32))
+  # batch=512: lr=5.66e-4 (sqrt:   1e-4 * sqrt(512/32))
 
   # 出力先は実行ごとに日時付きディレクトリが自動生成される
   # 明示的に指定も可能:
@@ -68,12 +129,19 @@ import math
 import argparse
 import time
 from datetime import datetime
+from contextlib import nullcontext
 from pathlib import Path
 from copy import deepcopy
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# B200/B300 (sm_100) ではcuDNN SDPAが未対応
+if torch.cuda.is_available():
+    cap = torch.cuda.get_device_capability()
+    if cap[0] >= 10:
+        torch.backends.cuda.enable_cudnn_sdp(False)
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
@@ -98,6 +166,53 @@ class FFHQDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         return img
+
+
+class FFHQDatasetRAM(Dataset):
+    """全画像をuint8でRAMにプリロード。初回はPNGデコード、2回目以降はキャッシュ(.pt)から高速ロード。"""
+    def __init__(self, root, img_size=512):
+        cache_path = Path(root) / f".cache_uint8_{img_size}.pt"
+        if cache_path.exists():
+            print(f"  Loading cached tensor from {cache_path}...")
+            self.data = torch.load(cache_path, weights_only=True)
+            print(f"  Loaded: {self.data.shape}, {self.data.numel()/1e9:.1f} GB (cached)")
+        else:
+            paths = sorted(Path(root).glob("*.png")) + sorted(Path(root).glob("*.jpg"))
+            n = len(paths)
+            print(f"  Loading {n} images into RAM (uint8, CHW)...")
+            import numpy as np
+            self.data = torch.empty(n, 3, img_size, img_size, dtype=torch.uint8)
+            for i, p in enumerate(paths):
+                img = Image.open(p).convert("RGB")
+                if img.size != (img_size, img_size):
+                    img = img.resize((img_size, img_size), Image.LANCZOS)
+                self.data[i] = torch.from_numpy(np.array(img)).permute(2, 0, 1)
+                if (i + 1) % 10000 == 0:
+                    print(f"    {i+1}/{n}")
+            print(f"  Loaded: {self.data.shape}, {self.data.numel()/1e9:.1f} GB RAM")
+            import shutil
+            disk_free = shutil.disk_usage(str(Path(root))).free / 1e9
+            cache_size = self.data.numel() / 1e9  # uint8 = 1byte
+            if disk_free > cache_size * 1.2:
+                print(f"  Saving cache to {cache_path} ({cache_size:.1f}GB, disk free: {disk_free:.0f}GB)...")
+                torch.save(self.data, cache_path)
+                print(f"  Cache saved")
+            else:
+                print(f"  Skipping cache (need {cache_size:.0f}GB, only {disk_free:.0f}GB free)")
+
+    def __len__(self):
+        return self.data.shape[0]
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+    def get_batch(self, batch_size, device):
+        """DataLoaderをバイパスして直接バッチを取得。GPU上でnormalize。"""
+        idx = torch.randint(0, len(self.data), (batch_size,))
+        batch = self.data[idx].to(device, non_blocking=True).float().div_(255.0).mul_(2).sub_(1)
+        flip = torch.rand(batch_size, device=device) > 0.5
+        batch[flip] = batch[flip].flip(-1)
+        return batch
 
 
 class LatentDataset(Dataset):
@@ -261,13 +376,16 @@ def train(args):
         vae_scaling_factor = vae.config.scaling_factor
         print(f"VAE decoder loaded: {args.vae_id} (scaling={vae_scaling_factor})")
     else:
-        transform = transforms.Compose([
-            transforms.Resize((args.img_size, args.img_size)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ])
-        dataset = FFHQDataset(args.data_dir, transform=transform)
+        if args.preload:
+            dataset = FFHQDatasetRAM(args.data_dir, img_size=args.img_size)
+        else:
+            transform = transforms.Compose([
+                transforms.Resize((args.img_size, args.img_size)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ])
+            dataset = FFHQDataset(args.data_dir, transform=transform)
         args.in_channels = 3
         print(f"Dataset: {len(dataset)} images")
 
@@ -280,6 +398,8 @@ def train(args):
         num_heads=args.num_heads,
         bottleneck_dim=args.bottleneck_dim,
         dropout=args.dropout,
+        num_experts=args.num_experts,
+        top_k=args.top_k,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
@@ -316,6 +436,7 @@ def train(args):
         print("  Liger RMSNorm enabled")
 
     # FP8 (学習モデルのみ、0-init層は除外)
+    # batch*seq < 16384 でNaN多発 (FP8 amax scaling不安定)。batch=64+推奨
     if args.fp8:
         from torchao.float8 import convert_to_float8_training, Float8LinearConfig
         zero_init_layers = {}
@@ -330,6 +451,61 @@ def train(args):
                 parent = getattr(parent, p)
             setattr(parent, parts[-1], orig.to(device))
         print("  FP8 Linear enabled (0-init layers excluded, requires torch nightly + torchao)")
+
+    # FP8 TE (Transformer Engine FP8, B300実測BF16比+9%。torchaoのFP8より高速)
+    fp8_te_enabled = False
+    fp8_te_recipe = None
+    te = None
+    if args.fp8_te:
+        import transformer_engine.pytorch as _te
+        from transformer_engine.common import recipe
+        te = _te
+        fp8_te_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID, amax_history_len=16)
+        for name, module in list(model.named_modules()):
+            if isinstance(module, nn.Linear):
+                parts = name.split('.')
+                parent = model
+                for p in parts[:-1]:
+                    parent = getattr(parent, p)
+                attr_name = parts[-1]
+                in_f = module.in_features
+                out_f = module.out_features
+                has_bias = module.bias is not None
+                te_linear = te.Linear(in_f, out_f, bias=has_bias, params_dtype=torch.bfloat16)
+                te_linear.weight.data.copy_(module.weight.data.to(torch.bfloat16))
+                if has_bias:
+                    te_linear.bias.data.copy_(module.bias.data.to(torch.bfloat16))
+                setattr(parent, attr_name, te_linear.to(device))
+        fp8_te_enabled = True
+        print("  FP8 TE (Transformer Engine DelayedScaling) enabled")
+
+    # FP4 (Transformer Engine NVFP4, B200/B300のみ)
+    fp4_enabled = False
+    fp4_recipe = None
+    if args.fp4:
+        if te is None:
+            import transformer_engine.pytorch as _te
+            te = _te
+        from transformer_engine.common import recipe
+        fp4_recipe = recipe.NVFP4BlockScaling()
+        for name, module in list(model.named_modules()):
+            if isinstance(module, nn.Linear):
+                parts = name.split('.')
+                parent = model
+                for p in parts[:-1]:
+                    parent = getattr(parent, p)
+                attr_name = parts[-1]
+                in_f = module.in_features
+                out_f = module.out_features
+                has_bias = module.bias is not None
+                te_linear = te.Linear(in_f, out_f, bias=has_bias, params_dtype=torch.bfloat16)
+                te_linear.weight.data.copy_(module.weight.data.to(torch.bfloat16))
+                if has_bias:
+                    te_linear.bias.data.copy_(module.bias.data.to(torch.bfloat16))
+                setattr(parent, attr_name, te_linear.to(device))
+        fp4_enabled = True
+        n_params_fp4 = sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"  FP4 (TE NVFP4) enabled: {n_params_fp4:.1f}M params, Blackwell sm_120+")
 
     # torch.compile
     if args.compile:
@@ -368,14 +544,15 @@ def train(args):
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     cropper = PatchCropper(args.img_size, args.patch_size, args.real_p)
 
+    nw = 0 if args.preload else args.num_workers
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=nw,
         pin_memory=True,
         drop_last=True,
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=nw > 0,
     )
 
     step = 0
@@ -383,6 +560,7 @@ def train(args):
     log_loss = 0.0
     log_step_time = 0.0
     log_count = 0
+    nan_count = 0
 
     # Resume
     if args.resume:
@@ -437,6 +615,34 @@ def train(args):
         with open(config_path, "w") as f:
             json.dump(vars(args), f, indent=2, default=str)
 
+    # Warmup phase: compile + FP8/FP4 stabilization
+    if args.compile or args.fp8 or args.fp8_te or args.fp4:
+        print("Warmup phase (compile + FP8/FP4 stabilization)...")
+        model.train()
+        if args.preload and hasattr(dataset, 'get_batch'):
+            warmup_images = dataset.get_batch(args.batch_size, device)
+        else:
+            warmup_loader = iter(loader)
+            warmup_images = next(warmup_loader).to(device, non_blocking=True)
+        warmup_nan = 0
+        for wi in range(10):
+            cs = cropper.crop_sizes[wi % len(cropper.crop_sizes)]
+            patches, ph, pw = cropper.crop_batch(warmup_images, cs)
+            t = logit_normal_timestep(patches.shape[0], m=args.lognorm_m, s=args.lognorm_s, device=device)
+            wu_te_ctx = te.fp8_autocast(enabled=True, fp8_recipe=fp4_recipe) if fp4_enabled else (te.fp8_autocast(enabled=True, fp8_recipe=fp8_te_recipe) if fp8_te_enabled else nullcontext())
+            with torch.amp.autocast("cuda", enabled=args.use_amp, dtype=torch.bfloat16), wu_te_ctx:
+                wloss = compute_v_loss(model, patches, t, ph, pw, noise_scale=args.noise_scale)
+            if not torch.isnan(wloss):
+                optimizer.zero_grad()
+                wloss.backward()
+                optimizer.step()
+            else:
+                warmup_nan += 1
+        for pg in optimizer.param_groups:
+            pg["lr"] = effective_lr
+        print(f"  Warmup done (nan={warmup_nan}/10)")
+        del warmup_images
+
     start_time = time.time()
 
     print(f"Training for {args.total_steps} steps (starting from {step})...")
@@ -450,13 +656,18 @@ def train(args):
     print(f"  AMP: {args.use_amp}, EMA decay: {args.ema_decay}")
 
     model.train()
+    use_direct_batch = args.preload and hasattr(dataset, 'get_batch')
     while step < args.total_steps:
         epoch += 1
-        for images in loader:
+        batch_iter = range(len(dataset) // args.batch_size) if use_direct_batch else loader
+        for batch_item in batch_iter:
             if step >= args.total_steps:
                 break
 
-            images = images.to(device, non_blocking=True)
+            if use_direct_batch:
+                images = dataset.get_batch(args.batch_size, device)
+            else:
+                images = batch_item.to(device, non_blocking=True)
             step_start = time.time()
 
             crop_size = cropper.sample_crop_size()
@@ -478,52 +689,68 @@ def train(args):
                     pg["lr"] = lr
 
             optimizer.zero_grad()
-            with torch.amp.autocast("cuda", enabled=args.use_amp, dtype=torch.bfloat16):
+            te_ctx = te.fp8_autocast(enabled=True, fp8_recipe=fp4_recipe) if fp4_enabled else (te.fp8_autocast(enabled=True, fp8_recipe=fp8_te_recipe) if fp8_te_enabled else nullcontext())
+            with torch.amp.autocast("cuda", enabled=args.use_amp, dtype=torch.bfloat16), te_ctx:
                 loss = compute_v_loss(model, patches, t, pos_h, pos_w,
                                      noise_scale=args.noise_scale)
 
-            scaler.scale(loss / batch_mul).backward()
-            scaler.unscale_(optimizer)
-            if args.grad_clip > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
+            if torch.isnan(loss):
+                optimizer.zero_grad()
+                nan_count += 1
+                step_time = time.time() - step_start
+            else:
+                scaler.scale(loss / batch_mul).backward()
+                scaler.unscale_(optimizer)
+                if args.grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
 
-            update_ema(ema_model, model, decay=args.ema_decay)
+                update_ema(ema_model, model, decay=args.ema_decay)
 
-            step_time = time.time() - step_start
-            log_loss += loss.item()
+                step_time = time.time() - step_start
+                log_loss += loss.item()
+                log_count += 1
             log_step_time += step_time
-            log_count += 1
             step += 1
 
             if step % args.log_every == 0:
-                avg_loss = log_loss / log_count
-                avg_step_ms = log_step_time / log_count * 1000
+                total_log = log_count + nan_count
+                avg_step_ms = log_step_time / total_log * 1000 if total_log > 0 else 0
                 cur_lr = optimizer.param_groups[0]["lr"]
-                cur_ips = args.batch_size / (log_step_time / log_count)
-                print(
-                    f"step={step:>7d}  loss={avg_loss:.4f}  "
-                    f"crop={crop_size:>3d}  "
-                    f"lr={cur_lr:.2e}  "
-                    f"step_time={avg_step_ms:.0f}ms  "
-                    f"img/s={cur_ips:.0f}"
-                )
-                elapsed = time.time() - start_time
-                with open(loss_log_path, "a", newline="") as f:
-                    csv.writer(f).writerow([
-                        step, f"{avg_loss:.6f}", crop_size,
-                        f"{cur_lr:.2e}", f"{elapsed:.1f}",
-                        f"{avg_step_ms:.1f}",
-                    ])
-                writer.add_scalar("loss/train", avg_loss, step)
-                writer.add_scalar("loss/crop_size", crop_size, step)
-                writer.add_scalar("lr", cur_lr, step)
-                writer.add_scalar("perf/step_time_ms", avg_step_ms, step)
-                writer.add_scalar("perf/img_per_sec", cur_ips, step)
+                cur_ips = args.batch_size / (log_step_time / total_log) if total_log > 0 else 0
+                if log_count > 0:
+                    avg_loss = log_loss / log_count
+                    nan_info = f"  nan={nan_count}/{total_log}" if nan_count > 0 else ""
+                    print(
+                        f"step={step:>7d}  loss={avg_loss:.4f}  "
+                        f"crop={crop_size:>3d}  "
+                        f"lr={cur_lr:.2e}  "
+                        f"step_time={avg_step_ms:.0f}ms  "
+                        f"img/s={cur_ips:.0f}{nan_info}"
+                    )
+                    elapsed = time.time() - start_time
+                    with open(loss_log_path, "a", newline="") as f:
+                        csv.writer(f).writerow([
+                            step, f"{avg_loss:.6f}", crop_size,
+                            f"{cur_lr:.2e}", f"{elapsed:.1f}",
+                            f"{avg_step_ms:.1f}",
+                        ])
+                    writer.add_scalar("loss/train", avg_loss, step)
+                    writer.add_scalar("loss/crop_size", crop_size, step)
+                    writer.add_scalar("lr", cur_lr, step)
+                    writer.add_scalar("perf/step_time_ms", avg_step_ms, step)
+                    writer.add_scalar("perf/img_per_sec", cur_ips, step)
+                else:
+                    print(
+                        f"step={step:>7d}  loss=nan ({nan_count}/{total_log} nan)  "
+                        f"crop={crop_size:>3d}  lr={cur_lr:.2e}  "
+                        f"step_time={avg_step_ms:.0f}ms  img/s={cur_ips:.0f}"
+                    )
                 log_loss = 0.0
                 log_step_time = 0.0
                 log_count = 0
+                nan_count = 0
 
             if step % args.save_every == 0:
                 ckpt = {
@@ -585,6 +812,10 @@ if __name__ == "__main__":
                    help="選択的ドロップアウト率。中間半分のブロックに適用 (JiT-H: 0.2)")
     p.add_argument("--noise_scale", type=float, default=1.0,
                    help="ノイズスケーリング。JiT方式: img_size/256 (256:1.0, 512:2.0)")
+    p.add_argument("--num_experts", type=int, default=0,
+                   help="MoE expert数。0=通常FFN。8=MoE 8experts (パラメータ~5倍、FFN計算1/4)")
+    p.add_argument("--top_k", type=int, default=2,
+                   help="MoEで各トークンが使うexpert数 (default: 2, DiT-MoE準拠)")
 
     # Patch Diffusion
     p.add_argument("--real_p", type=float, default=0.5)
@@ -614,7 +845,17 @@ if __name__ == "__main__":
     p.add_argument("--liger", action="store_true", default=False,
                    help="Liger-Kernel RMSNorm (liger-kernel必要)")
     p.add_argument("--fp8", action="store_true", default=False,
-                   help="FP8 Linear (torchao)。0-init層は自動除外。torch nightly + torchao必要")
+                   help="FP8 Linear (torchao)。0-init層は自動除外。torch nightly + torchao必要。"
+                        "注意: batch*seq < 16384 (例: batch=32, crop=256) ではFP8スケーリングが"
+                        "不安定でNaN多発。batch=64以上を推奨")
+    p.add_argument("--fp8_te", action="store_true", default=False,
+                   help="FP8 training (Transformer Engine)。torchaoのFP8より高速 (B300実測+9%)。"
+                        "nn.LinearをTE Linearに置換し、DelayedScaling recipeで学習。"
+                        "TEソースビルド必要 (notes/b300_fp4_setup.md 参照)")
+    p.add_argument("--fp4", action="store_true", default=False,
+                   help="FP4 training (Transformer Engine NVFP4)。B200/B300のみ (sm_100a/compute_100f)。"
+                        "nn.LinearをTE Linearに置換し、NVFP4BlockScaling recipeで学習。"
+                        "D≥2048で効果的。D<2048では--fp8_teを推奨")
     p.add_argument("--compile", action="store_true", default=False,
                    help="torch.compile (dynamic=True)")
     p.add_argument("--max_autotune", action="store_true", default=False,
@@ -622,6 +863,8 @@ if __name__ == "__main__":
     p.add_argument("--optim_8bit", action="store_true", default=False,
                    help="8-bit Adam (bitsandbytes)。optimizer転送量を4分の1に削減")
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--preload", action="store_true", default=False,
+                   help="全画像をuint8でRAMにプリロード。RAM 55GB+必要だがデータローディング10x高速化")
 
     # Resume
     p.add_argument("--resume", type=str, default=None,
