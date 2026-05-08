@@ -2,8 +2,25 @@
 
 **English** | [日本語](README_ja.md)
 
-A 130M-parameter pixel-space Diffusion Transformer trained from scratch on FFHQ + CelebA-HQ (100K face images, 512x512).
-After pre-training, the model is aligned with human preferences via **Diffusion-DPO** (adapted for Flow Matching), and extended to **semantic segmentation** through multi-task continued pre-training with only 104 annotated images.
+A compact 130M-parameter pixel-space Diffusion Transformer trained from scratch on 100K face images.
+The project explores whether a small, domain-specific DiT can be reused across generation,
+preference alignment, and dense prediction without relying on a large pre-trained text-to-image model.
+
+The pipeline includes:
+- Flow Matching pre-training in pixel space
+- Diffusion-DPO adapted from DDPM noise prediction to Flow Matching velocity prediction
+- DINOv2-based automated preference pair mining
+- Multi-task continued pre-training for semantic segmentation with only 104 annotated masks
+
+## Results Summary
+
+| Component | Setting | Result |
+|---|---|---|
+| Face generation | 130M pixel-space DiT, 512×512 | Qualitative face synthesis from scratch |
+| Pre-training | FFHQ 70K + CelebA-HQ 30K, 530K steps | ~364 img/s on RTX 6000 Ada |
+| Preference alignment (DPO) | 500 human preference pairs, β=1000 | +3.4% DINO quality score, reduced artifacts |
+| Segmentation | 104 annotated CelebAMask-HQ images | 78.8% pixel accuracy / 43.2% mIoU on 200 unseen images |
+| Best seg classes | skin / background / nose / hair | 73.7 / 71.2 / 80.0 / 58.7 IoU |
 
 ## Key Results
 
@@ -60,9 +77,13 @@ All images below are **unseen** (not in the 104-image training set):
 
 The model supports both unconditional face generation and conditional segmentation through:
 
-- **`task_emb`**: Learned task embedding (0 = face generation, 1 = segmentation), added to the timestep embedding via AdaLN
-- **`modality_emb`**: Learned modality embedding (0 = condition tokens, 1 = denoising target), added to patch tokens
-- For segmentation: image tokens and noisy mask tokens are concatenated and processed together via self-attention (MMDiT-style), with shared 2D RoPE positions ensuring spatial correspondence
+- **`task_emb`**: Learned task embedding (0 = face generation, 1 = segmentation),
+  added to the timestep embedding via AdaLN
+- **`modality_emb`**: Learned modality embedding (0 = condition tokens, 1 = denoising target),
+  added to patch tokens
+- For segmentation: image tokens and noisy mask tokens are concatenated and processed
+  together via self-attention (MMDiT-style), with shared 2D RoPE positions ensuring
+  spatial correspondence
 
 Both embeddings are zero-initialized for backward compatibility with pre-trained checkpoints.
 
@@ -80,35 +101,51 @@ Both embeddings are zero-initialized for backward compatibility with pre-trained
 <img src="assets/loss_curve.png" width="800">
 </p>
 
-**Finding**: Loss continued to decrease after 400K steps (0.0225 -> 0.0224), but **generation quality did not visibly improve**. The model was spending compute on imperceptible high-frequency details. This motivated DPO as a more efficient path to quality improvement.
+**Finding**: Loss continued to decrease after 400K steps (0.0225 → 0.0224), but
+**generation quality did not visibly improve**. The model was spending compute on
+imperceptible high-frequency details. This motivated DPO as a more efficient path
+to quality improvement.
 
 ### Stage 2: Diffusion-DPO (Preference Alignment)
 
-We adapted [Diffusion-DPO](https://arxiv.org/abs/2311.12908) (Wallace et al., 2023) from DDPM noise-prediction to Flow Matching v-prediction:
+We adapted [Diffusion-DPO](https://arxiv.org/abs/2311.12908) (Wallace et al., 2023)
+from DDPM noise-prediction to Flow Matching v-prediction:
 
 **Original (DDPM)**:
 ```
-L = -log sigma(-beta * T * (||eps_w - eps_theta||^2 - ||eps_w - eps_ref||^2
-                           - (||eps_l - eps_theta||^2 - ||eps_l - eps_ref||^2)))
+L = -log σ(-βT(||ε_w - ε_θ||² - ||ε_w - ε_ref||²
+             - (||ε_l - ε_θ||² - ||ε_l - ε_ref||²)))
 ```
 
 **Ours (Flow Matching)**:
 ```
-L = -log sigma(-beta * (||v_w - v_theta||^2 - ||v_w - v_ref||^2
-                       - (||v_l - v_theta||^2 - ||v_l - v_ref||^2)))
+L = -log σ(-β(||v_w - v_θ||² - ||v_w - v_ref||²
+            - (||v_l - v_θ||² - ||v_l - v_ref||²)))
 ```
 
 Key differences:
 - Replace noise-prediction MSE with velocity-prediction MSE
 - Remove the T factor (continuous time, no discrete step count)
-- Forward process: `z_t = t * x_0 + (1-t) * eps` instead of DDPM schedule
+- Forward process: `z_t = t * x_0 + (1-t) * ε` instead of DDPM schedule
 
 **DPO Training Details**:
 - 500 human-evaluated pairwise preferences via browser-based A/B comparison UI
-- beta=1000, lr=1e-6, 50 epochs
+- β=1000, lr=1e-6, 50 epochs
 - Reference model: frozen copy of the pre-trained base
 
+**DPO Evaluation**:
+
+| Model | DINO K-NN Score ↑ | Low-quality rate (score < 0.5) ↓ |
+|-------|---:|---:|
+| Base (530K) | 0.643 | 3.8% |
+| + DPO (500 pairs) | 0.665 (+3.4%) | 3.4% |
+
+We also evaluate qualitatively using fixed-seed before/after comparisons.
+Improvements are most visible on local facial failures such as distorted eyes, noses,
+and mouths. A larger-scale human preference win-rate evaluation is left for future work.
+
 **Automated DPO Pipeline** (`auto_dpo.py`):
+
 We also built a fully automated iterative DPO pipeline using DINOv2 features:
 1. Generate 10K images from the current model
 2. Score each image by K-NN cosine similarity to FFHQ features (DINOv2 ViT-B/14)
@@ -117,7 +154,8 @@ We also built a fully automated iterative DPO pipeline using DINOv2 features:
 5. Repeat with updated model as reference
 
 **Hyperparameter sensitivity**:
-| beta | lr | Result |
+
+| β | lr | Result |
 |------|----|--------|
 | 5000 | 1e-6 | Too conservative, no visible change |
 | 1000 | 1e-6 | Good balance, subtle but measurable improvement |
@@ -126,18 +164,28 @@ We also built a fully automated iterative DPO pipeline using DINOv2 features:
 
 ### Stage 3: Multi-Task Segmentation
 
-Semantic segmentation is cast as a **conditional image generation task**: given a face image, generate the corresponding RGB segmentation mask through the denoising process.
+Semantic segmentation is cast as a **conditional image generation task**: given a face image,
+generate the corresponding RGB segmentation mask through the denoising process.
 
 - **Data**: CelebAMask-HQ, using only **104 images** (10% of available annotations)
-- **15 classes**: background, skin, nose, left/right eye, left/right brow, left/right ear, mouth, upper/lower lip, hair, neck
+- **15 classes**: background, skin, nose, left/right eye, left/right brow,
+  left/right ear, mouth, upper/lower lip, hair, neck
 - **Training**: 50K steps, seg_ratio=0.1 (10% of steps are segmentation, 90% face generation)
-- **Conditioning**: Image patches serve as condition tokens (no noise), mask patches are denoised. Both share the same RoPE positions for spatial alignment.
+- **Conditioning**: Image patches serve as condition tokens (no noise), mask patches are
+  denoised. Both share the same RoPE positions for spatial alignment.
 
-**Why 104 images is enough**: The model already understands face structure from 530K steps of generation training. Segmentation only needs to learn the color-coding mapping, not face anatomy.
+**Why 104 images can work**: The generative pre-training appears to provide a strong
+face-structure prior. The segmentation stage therefore does not need to learn facial
+geometry from scratch; it mainly adapts the shared representation to a color-coded
+dense prediction target.
 
-**Segmentation DPO**: We further improved segmentation quality with 2 rounds of DPO using 100 human-evaluated mask preference pairs each.
+**Segmentation DPO**: We further improved segmentation quality with 2 rounds of DPO
+using 100 human-evaluated mask preference pairs each.
 
 **Quantitative Evaluation** (200 unseen images):
+
+The 200 evaluation images are disjoint from the 104 annotated images used for training.
+No segmentation masks from the evaluation split are used during training or DPO pair construction.
 
 | Metric | Value |
 |--------|-------|
@@ -156,7 +204,9 @@ Per-class IoU:
 | r_ear | 18.3% | l_brow | 8.1% |
 | l_ear | 0.0% | mouth | 0.0% |
 
-Large regions (skin, hair, background, nose) perform well. Small parts (brows, ears, mouth interior) are challenging with only 104 training images. Full dataset (1042 images) would likely improve these significantly.
+Large regions (skin, hair, background, nose) perform well. Small parts (brows, ears,
+mouth interior) are challenging with only 104 training images.
+Full dataset (1042 images) would likely improve these significantly.
 
 ## Memorization Analysis
 
@@ -166,15 +216,25 @@ We verified the model generates novel faces rather than memorizing training data
 <img src="assets/memorization_check_100.png" width="600">
 </p>
 
-Mean cosine similarity to nearest training image: 0.937 (pixel space at 256x256). Visual inspection confirmed all generated faces are distinct individuals. Note that pixel-space cosine similarity is not a reliable memorization metric for aligned face datasets — frontal-facing faces with similar skin tones naturally produce high similarity regardless of identity. We therefore rely on visual nearest-neighbor inspection to confirm novelty.
+Mean cosine similarity to nearest training image: 0.937 (pixel space at 256x256).
+Visual inspection confirmed all generated faces are distinct individuals.
+
+Note that pixel-space cosine similarity is not a reliable memorization metric for
+aligned face datasets — frontal-facing faces with similar skin tones naturally produce
+high similarity regardless of identity. We therefore rely on visual nearest-neighbor
+inspection to confirm novelty.
 
 ## Limitations
 
-- Quantitative evaluation of generation quality (FID/KID) is not yet computed; results are primarily qualitative.
-- Segmentation is limited to aligned frontal face images (CelebAMask-HQ domain). Generalization to arbitrary poses or non-face images is not expected.
-- Small facial parts (eyebrows, ears, mouth interior) have low IoU due to the limited training set (104 images).
-- The model is unconditional and domain-specific (faces only), not a general text-to-image model.
-- DPO improvement is subtle at the current scale; stronger effects may require more preference data or larger models.
+- Quantitative generation evaluation (FID/KID) is not yet computed; results are primarily qualitative.
+- Segmentation is limited to aligned frontal face images (CelebAMask-HQ domain).
+  Generalization to arbitrary poses or non-face images is not expected.
+- Small facial parts (eyebrows, ears, mouth interior) have low IoU due to the limited
+  training set (104 images).
+- The model is unconditional and domain-specific (faces only),
+  not a general text-to-image model.
+- DPO improvement is subtle at the current scale; stronger effects may require
+  more preference data or larger models.
 
 ## Usage
 
