@@ -95,7 +95,8 @@ Both embeddings are zero-initialized for backward compatibility with pre-trained
 - **Method**: Flow Matching with Rectified Flow, v-loss, logit-normal timestep sampling
 - **Patch Diffusion**: 50% probability of training on half-resolution random crops (256x256)
 - **Training**: 530K steps, batch size 128, lr=1e-4, AdamW 8-bit, BF16 + torch.compile
-- **Hardware**: RTX 6000 Ada 48GB (~364 img/s, ~58 min per 10K steps)
+- **Hardware**: RTX 6000 Ada 48GB (~364 img/s, ~58 min per 10K steps).
+  Throughput measured with batch=128, BF16, torch.compile, 8-bit AdamW, Liger RMSNorm, RAM preload.
 
 <p align="center">
 <img src="assets/loss_curve.png" width="800">
@@ -146,9 +147,12 @@ Key differences:
 | Base (530K) | 0.643 | 3.8% |
 | + DPO (500 pairs) | 0.665 (+3.4%) | 3.4% |
 
-We also evaluate qualitatively using fixed-seed before/after comparisons.
-Improvements are most visible on local facial failures such as distorted eyes, noses,
-and mouths. A larger-scale human preference win-rate evaluation is left for future work.
+DINO K-NN score is computed over 500 generated samples using DINOv2 ViT-B/14 features
+with K=10. Each image is scored by its mean cosine similarity to the 10 nearest FFHQ
+training features. This serves as a proxy for face-domain plausibility, not a replacement
+for human preference evaluation. We also evaluate qualitatively using fixed-seed
+before/after comparisons. Improvements are most visible on local facial failures such as
+distorted eyes, noses, and mouths.
 
 **Automated DPO Pipeline** (`auto_dpo.py`):
 

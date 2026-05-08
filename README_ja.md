@@ -95,7 +95,8 @@
 - **手法**: Rectified Flowによる Flow Matching、v-loss、logit-normalタイムステップサンプリング
 - **Patch Diffusion**: 50%の確率で半解像度のランダムクロップ（256×256）で学習
 - **学習**: 53万ステップ、バッチサイズ128、lr=1e-4、AdamW 8bit、BF16 + torch.compile
-- **ハードウェア**: RTX 6000 Ada 48GB（約364 img/s、10Kステップあたり約58分）
+- **ハードウェア**: RTX 6000 Ada 48GB（約364 img/s、10Kステップあたり約58分）。
+  batch=128、BF16、torch.compile、8bit AdamW、Liger RMSNorm、RAMプリロード有効時の計測。
 
 <p align="center">
 <img src="assets/loss_curve.png" width="800">
@@ -145,8 +146,11 @@ L = -log σ(-β(||v_w - v_θ||² - ||v_w - v_ref||²
 | Base (530K) | 0.643 | 3.8% |
 | + DPO (500ペア) | 0.665 (+3.4%) | 3.4% |
 
+DINO K-NNスコアはDINOv2 ViT-B/14特徴量を用い、K=10で500枚の生成画像に対して計算。
+各画像はFFHQ訓練特徴量の上位10近傍との平均コサイン類似度でスコアリング。
+これは顔ドメインのもっともらしさの代理指標であり、人手嗜好評価の代替ではない。
 固定シードでのbefore/after比較により定性的にも評価。改善は目・鼻・口の
-局所的な破綻の修正で最も顕著。大規模な人手嗜好勝率の評価は今後の課題。
+局所的な破綻の修正で最も顕著。
 
 **自動DPOパイプライン**（`auto_dpo.py`）:
 
