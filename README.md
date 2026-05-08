@@ -135,6 +135,27 @@ Semantic segmentation is cast as a **conditional image generation task**: given 
 
 **Segmentation DPO**: We further improved segmentation quality with 2 rounds of DPO using 100 human-evaluated mask preference pairs each.
 
+**Quantitative Evaluation** (200 unseen images):
+
+| Metric | Value |
+|--------|-------|
+| **Pixel Accuracy** | **78.8%** |
+| **mIoU** | **43.2%** |
+
+Per-class IoU:
+
+| Class | IoU | Class | IoU |
+|-------|-----|-------|-----|
+| background | 71.2% | skin | 73.7% |
+| nose | 80.0% | hair | 58.7% |
+| l_eye | 62.0% | r_eye | 61.5% |
+| l_lip | 64.7% | u_lip | 43.6% |
+| neck | 37.5% | r_brow | 25.0% |
+| r_ear | 18.3% | l_brow | 8.1% |
+| l_ear | 0.0% | mouth | 0.0% |
+
+Large regions (skin, hair, background, nose) perform well. Small parts (brows, ears, mouth interior) are challenging with only 104 training images. Full dataset (1042 images) would likely improve these significantly.
+
 ## Memorization Analysis
 
 We verified the model generates novel faces rather than memorizing training data:
@@ -143,7 +164,15 @@ We verified the model generates novel faces rather than memorizing training data
 <img src="assets/memorization_check_100.png" width="600">
 </p>
 
-Mean cosine similarity to nearest training image: 0.937 (pixel space at 256x256). Visual inspection confirmed all generated faces are distinct individuals. High similarity is expected for face datasets due to shared structural properties.
+Mean cosine similarity to nearest training image: 0.937 (pixel space at 256x256). Visual inspection confirmed all generated faces are distinct individuals. Note that pixel-space cosine similarity is not a reliable memorization metric for aligned face datasets — frontal-facing faces with similar skin tones naturally produce high similarity regardless of identity. We therefore rely on visual nearest-neighbor inspection to confirm novelty.
+
+## Limitations
+
+- Quantitative evaluation of generation quality (FID/KID) is not yet computed; results are primarily qualitative.
+- Segmentation is limited to aligned frontal face images (CelebAMask-HQ domain). Generalization to arbitrary poses or non-face images is not expected.
+- Small facial parts (eyebrows, ears, mouth interior) have low IoU due to the limited training set (104 images).
+- The model is unconditional and domain-specific (faces only), not a general text-to-image model.
+- DPO improvement is subtle at the current scale; stronger effects may require more preference data or larger models.
 
 ## Usage
 
