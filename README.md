@@ -330,6 +330,20 @@ make_denoise_video.py    # Denoising process visualization
 assets/                  # Images, graphs, and training curves
 ```
 
+## Future Work
+
+- **Scale up**: Train larger models (1B+ params) on broader datasets beyond faces
+  to test whether the same three-stage pipeline (pre-training → DPO → multi-task)
+  generalizes to open-domain image generation and diverse vision tasks.
+- **FID/KID evaluation**: Add standard generation quality metrics for rigorous comparison.
+- **More segmentation data**: Use the full CelebAMask-HQ (1042 images) and additional
+  dense prediction tasks (depth estimation, edge detection) to further validate
+  the "generalist vision learner" hypothesis.
+- **Automated DPO at scale**: Run more iterative auto-DPO rounds with larger
+  generation batches and explore reward model distillation.
+- **Conditional generation**: Add text or class conditioning to move toward
+  a controllable generation model.
+
 ## References
 
 - [Flow Matching for Generative Modeling](https://arxiv.org/abs/2210.02747) (Lipman et al., 2022)
