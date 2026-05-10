@@ -218,6 +218,35 @@ Large regions (skin, hair, background, nose) perform well. Small parts (brows, e
 mouth interior) are challenging with only 104 training images.
 Full dataset (1042 images) would likely improve these significantly.
 
+### Ablation: How Much Pre-Training is Needed for Segmentation?
+
+We ran the same segmentation training (104 images, 50K steps) starting from different
+pre-training checkpoints to investigate the relationship between generation quality
+and downstream segmentation ability:
+
+| Pre-training steps | Generation quality | Pixel Accuracy | mIoU |
+|---:|---|---:|---:|
+| 10K | Noisy, painting-like | 72.1% | 37.1% |
+| 50K | Recognizable faces | 77.7% | 41.4% |
+| 100K | Good faces | 76.1% | 41.5% |
+| 200K | High quality | **79.4%** | **43.9%** |
+| 300K | High quality | 73.4% | 40.6% |
+| 530K | High quality (final) | 78.8% | 43.2% |
+
+**Key findings**:
+- Even at 10K steps (when generation is still broken), the model achieves 37.1% mIoU
+  — structural understanding of faces is acquired very early in training.
+- Segmentation performance plateaus around 50K-100K steps (41-42% mIoU),
+  far before generation quality converges (~400K steps).
+- The best segmentation (43.9% mIoU) comes from the 200K checkpoint,
+  not the final 530K — more generation training does not necessarily improve
+  downstream task performance.
+
+This suggests that **the structural prior needed for dense prediction is acquired
+much earlier than the fine-grained details needed for high-quality generation**.
+This parallels findings in LLMs where downstream task ability often emerges
+well before pre-training loss fully converges.
+
 ## Memorization Analysis
 
 We verified the model generates novel faces rather than memorizing training data:
